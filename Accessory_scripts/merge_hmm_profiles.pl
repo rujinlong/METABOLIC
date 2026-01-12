@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # merge_hmm_profiles.pl
 # Merges individual HMM files into a single database for efficient hmmpress/hmmsearch
 # Usage: perl merge_hmm_profiles.pl <input_dir> <output_file> [filter_list]

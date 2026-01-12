@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 ##########################################################
 # hmmscan parser for dbCAN meta server
 #
