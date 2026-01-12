@@ -301,11 +301,62 @@ my %Motif_pair = _get_motif_pair($motif_pair_file); # dsrC => tusE
 my %Hmmscan_result = (); # genome_name => hmm => numbers
 my %Hmmscan_hits = (); # genome_name => hmm => hits
 my %Hmm_id = (); # hmm => 1 
-open IN, "find $output/intermediate_files/Hmmsearch_Outputs -type f -name '*.hmmsearch_result.txt' | ";
+
+# Helper subroutine to process a hit and add to results
+sub _process_hit {
+	my ($gn_id, $hmm, $seq_id, $hmmscan_result_ref, $hmmscan_hits_ref, $hmm_id_ref) = @_;
+	$hmm_id_ref->{$hmm} = 1;
+	if (! exists $hmmscan_hits_ref->{$gn_id}{$hmm}){
+		$hmmscan_hits_ref->{$gn_id}{$hmm} = $seq_id;
+	}else{
+		$hmmscan_hits_ref->{$gn_id}{$hmm} .= ",".$seq_id;
+	}
+	$hmmscan_result_ref->{$gn_id}{$hmm}++;
+}
+
+# Parse merged kofam results (single file with all kofam hits)
+my $kofam_result_file = "$output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt";
+if (-e $kofam_result_file) {
+	open INN, "$kofam_result_file";
+	while (<INN>){
+		chomp;
+		next if (/^#/);
+		my $line = $_; $line =~ s/\s+/\t/g;
+		my @tmp = split (/\t/,$line);
+		my $seq_id = $tmp[0];
+		my $hmm_name = $tmp[2];
+		my $hmm = "$hmm_name.hmm";
+		my $full_score = $tmp[5];
+		my $domain_score = $tmp[8];
+		
+		my $gn_id = $Seqid2Genomeid{$seq_id};
+		next unless $gn_id;
+		
+		next unless exists $Total_hmm2threshold{$hmm};
+		my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/;
+		
+		my $pass_threshold = 0;
+		if ($score_type eq "domain"){
+			$pass_threshold = 1 if ($domain_score >= $threshold);
+		}else{
+			$pass_threshold = 1 if ($full_score >= $threshold);
+		}
+		
+		if ($pass_threshold){
+			_process_hit($gn_id, $hmm, $seq_id, \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
+		}
+	}
+	close INN;
+}
+
+# Parse METABOLIC-specific HMM results (individual files, non-kofam)
+open IN, "find $output/intermediate_files/Hmmsearch_Outputs -type f -name '*.hmm.total.hmmsearch_result.txt' | ";
 while (<IN>){
         chomp;
         my $file_name = $_;
         my ($hmm) = $file_name =~ /^$output\/intermediate_files\/Hmmsearch_Outputs\/(.+?\.hmm)\./; 
+        next unless $hmm;
+        next if ($hmm =~ /^K\d\d\d\d\d/);
 		$Hmm_id{$hmm} = 1;
 		my $gn_id = "";
         open INN, "$file_name";
@@ -314,63 +365,44 @@ while (<IN>){
                 if (!/^#/){
                         my $line = $_; $line =~ s/\s+/\t/g;
 						my @tmp = split (/\t/,$line); $gn_id = $Seqid2Genomeid{$tmp[0]};
+						next unless $gn_id;
 						my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/; 
 						if ($score_type eq "domain"){
 							if ($tmp[8] >= $threshold){
 								my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
 								if (exists $Motif{$hmm_basename}){
 									my $seq; 
-									my $motif = $Motif{$hmm_basename}; $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 									
-									my %Seq_gn = _store_seq("$input_protein_folder/total.faa"); # Get the total genome sequences
+									my $motif = $Motif{$hmm_basename}; $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g;
+									my %Seq_gn = _store_seq("$input_protein_folder/total.faa");
 									$seq = $Seq_gn{">$tmp[0]"};
 									if ($seq =~ /$motif/){
-										if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-											$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-										}else{
-											$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-										}
-										$Hmmscan_result{$gn_id}{$hmm}++;
+										_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 									}
 								}elsif(exists $Motif_pair{$hmm_basename}){
 									my $motif_hmm = "$METABOLIC_hmm_db_address/$hmm_basename.check.hmm";
 									my $motif_anti_hmm = "$METABOLIC_hmm_db_address/$Motif_pair{$hmm_basename}.check.hmm";
-									_get_1_from_input_faa("$input_protein_folder/total.faa",">$tmp[0]","$output/tmp.$hmm_basename.check.faa");								
+									_get_1_from_input_faa("$input_protein_folder/total.faa",">$tmp[0]","$output/tmp.$hmm_basename.check.faa");
 									`hmmsearch --cpu 1 --tblout $output/tmp.$hmm_basename.check.hmmsearch_result.txt $motif_hmm $output/tmp.$hmm_basename.check.faa`;
 									`hmmsearch --cpu 1 --tblout $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt $motif_anti_hmm $output/tmp.$hmm_basename.check.faa`;
 									my $motif_check_score = _get_check_score("$output/tmp.$hmm_basename.check.hmmsearch_result.txt"); 
 									my $motif_anti_check_score = _get_check_score("$output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt");
 									if ($motif_check_score >= $motif_anti_check_score and $motif_check_score != 0){
-										if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-											$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-										}else{
-											$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-										}
-										$Hmmscan_result{$gn_id}{$hmm}++;
+										_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 									}
-									`rm $output/tmp.$hmm_basename.check.faa $output/tmp.$hmm_basename.check.hmmsearch_result.txt $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt`;									
-								}else{ # Do not have motif check step
-									if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-										$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-									}else{
-										$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-									}
-									$Hmmscan_result{$gn_id}{$hmm}++;
+									`rm $output/tmp.$hmm_basename.check.faa $output/tmp.$hmm_basename.check.hmmsearch_result.txt $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt`;
+								}else{
+									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
 							}
 						}else{
 							my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
 							if (exists $Motif{$hmm_basename}){
-								my $seq; # The protein seq
-								my $motif = $Motif{$hmm_basename};  $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 		
-								my %Seq_gn = _store_seq("$input_protein_folder/total.faa"); # get the total genome sequences
+								my $seq;
+								my $motif = $Motif{$hmm_basename};  $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g;
+								my %Seq_gn = _store_seq("$input_protein_folder/total.faa");
 								$seq = $Seq_gn{">$tmp[0]"};
 								if ($seq =~ /$motif/){
-									if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-										$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-									}else{
-										$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-									}
-									$Hmmscan_result{$gn_id}{$hmm}++;
+									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
 							}elsif(exists $Motif_pair{$hmm_basename}){
 								my $motif_hmm = "$METABOLIC_hmm_db_address/$hmm_basename.check.hmm";
@@ -381,26 +413,16 @@ while (<IN>){
 								my $motif_check_score = _get_check_score("$output/tmp.$hmm_basename.check.hmmsearch_result.txt"); 
 								my $motif_anti_check_score = _get_check_score("$output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt");
 								if ($motif_check_score >= $motif_anti_check_score and $motif_check_score != 0){
-									if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-										$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-									}else{
-										$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-									}
-									$Hmmscan_result{$gn_id}{$hmm}++;
+									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
 								`rm $output/tmp.$hmm_basename.check.faa $output/tmp.$hmm_basename.check.hmmsearch_result.txt $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt`;
 							}else{
-								if (! exists $Hmmscan_hits{$gn_id}{$hmm}){
-									$Hmmscan_hits{$gn_id}{$hmm} = $tmp[0];
-								}else{
-									$Hmmscan_hits{$gn_id}{$hmm} .= "\,".$tmp[0];
-								}
-								$Hmmscan_result{$gn_id}{$hmm}++;
+								_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 							}
-						}						
+						}
                 }
         }
-        close INN;		
+        close INN;
 }
 close IN;
 

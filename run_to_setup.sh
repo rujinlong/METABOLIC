@@ -4,15 +4,21 @@ tar zxvf METABOLIC_template_and_database.tgz; rm  METABOLIC_template_and_databas
 tar zxvf Motif.tgz; rm Motif.tgz
 mkdir kofam_database  
 cd kofam_database  
-curl --silent ftp://ftp.genome.jp/pub/db/kofam/ko_list.gz  -O ko_list.gz
-curl --silent ftp://ftp.genome.jp/pub/db/kofam/profiles.tar.gz  -O profiles.tar.gz
+wget -c -O ko_list.gz "https://www.genome.jp/ftp/db/kofam/ko_list.gz"
+wget -c -O profiles.tar.gz "https://www.genome.jp/ftp/db/kofam/profiles.tar.gz"
 gzip --quiet -d ko_list.gz  
 tar xzf profiles.tar.gz; rm profiles.tar.gz  
 mv ../All_Module_KO_ids.txt profiles
-cd profiles  
-cp ../../Accessory_scripts/batch_hmmpress.pl ./  
-perl batch_hmmpress.pl
-cd ../
+
+# Create merged HMM databases (significantly reduces file count for HPC compatibility)
+# Full database: all prokaryotic KOs
+perl ../Accessory_scripts/merge_hmm_profiles.pl profiles kofam_all.hmm profiles/prokaryote.hal
+hmmpress kofam_all.hmm
+
+# Small database: only module-related KOs (for -kofam-db small option)
+perl ../Accessory_scripts/merge_hmm_profiles.pl profiles kofam_small.hmm profiles/All_Module_KO_ids.txt
+hmmpress kofam_small.hmm
+
 cd ../
 mkdir dbCAN2
 cd dbCAN2
