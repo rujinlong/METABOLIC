@@ -314,14 +314,38 @@ foreach my $hmm (sort keys %Total_hmm2threshold){
 		print OUT "hmmsearch --domT $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
 	}
 }
+
+# OPTIMIZATION: Add dbCAN2 searches to the same batch for parallel execution
+`mkdir -p $output/intermediate_files/dbCAN2_Files`;
+open IN_FAA, "ls $input_protein_folder/*.faa |";
+while (<IN_FAA>){
+	chomp;
+	my $file = $_;
+	next if ($file =~ /total\.faa$/); # Skip the merged file
+	my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
+	print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out 2>/dev/null; python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
+}
+close IN_FAA;
+
 close OUT;
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] The hmmsearch is running with $cpu_numbers cpu threads...\n";
+print "\[$datestring\] The hmmsearch/dbCAN2 is running with $cpu_numbers cpu threads...\n";
 
-# Parallel run hmmsearch
+# OPTIMIZATION: Run MEROPS Diamond search in background while hmmsearch runs
+`mkdir -p $output/intermediate_files/MEROPS_Files`;
+my $merops_pid = fork();
+if ($merops_pid == 0) {
+	# Child process - run MEROPS Diamond search
+	exec("diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $input_protein_folder/total.faa -o $output/intermediate_files/MEROPS_Files/total.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 4 2>/dev/null");
+	exit(0);
+}
 
+# Parallel run hmmsearch and dbCAN2
 _run_parallel("$output/tmp_run_hmmsearch.sh", $cpu_numbers); `rm $output/tmp_run_hmmsearch.sh`;
+
+# Wait for MEROPS Diamond to finish
+waitpid($merops_pid, 0);
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] The hmmsearch is finished\n";
@@ -329,6 +353,15 @@ print "\[$datestring\] The hmmsearch is finished\n";
 # Store motif validation files
 my %Motif = _get_motif($motif_file); # protein id => motif sequences (DsrC => GPXKXXCXXXGXPXPXXCX)
 my %Motif_pair = _get_motif_pair($motif_pair_file); # dsrC => tusE
+
+# OPTIMIZATION: Pre-compile regex patterns for motif matching
+# This avoids re-compiling the same regex pattern for each sequence hit
+my %Motif_regex = ();
+foreach my $hmm_basename (keys %Motif) {
+	my $motif = $Motif{$hmm_basename};
+	$motif =~ s/X/[ARNDCQEGHILKMFPSTWYV]/g;
+	$Motif_regex{$hmm_basename} = qr/$motif/;
+}
 
 # OPTIMIZATION: Pre-load all sequences from total.faa once for motif validation
 # This avoids repeated file reads in the parsing loop (major performance improvement)
@@ -417,11 +450,10 @@ while (<IN>){
 						if ($score_type eq "domain"){
 							if ($tmp[8] >= $threshold){
 								my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
-								if (exists $Motif{$hmm_basename}){
-									# OPTIMIZATION: Use cached sequences instead of re-reading file
-									my $motif = $Motif{$hmm_basename}; $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 								
+								if (exists $Motif_regex{$hmm_basename}){
+									# OPTIMIZATION: Use pre-compiled regex and cached sequences
 									my $seq = $Seq_gn_cached{">$tmp[0]"};
-									if ($seq && $seq =~ /$motif/){
+									if ($seq && $seq =~ $Motif_regex{$hmm_basename}){
 										_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 									}
 								}elsif(exists $Motif_pair{$hmm_basename}){
@@ -433,11 +465,10 @@ while (<IN>){
 							}
 						}else{
 							my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
-							if (exists $Motif{$hmm_basename}){
-								# OPTIMIZATION: Use cached sequences instead of re-reading file
-								my $motif = $Motif{$hmm_basename};  $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 		
+							if (exists $Motif_regex{$hmm_basename}){
+								# OPTIMIZATION: Use pre-compiled regex and cached sequences
 								my $seq = $Seq_gn_cached{">$tmp[0]"};
-								if ($seq && $seq =~ /$motif/){
+								if ($seq && $seq =~ $Motif_regex{$hmm_basename}){
 									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
 							}elsif(exists $Motif_pair{$hmm_basename}){
@@ -548,6 +579,10 @@ if (@motif_pair_candidates) {
 }
 
 `rm $input_protein_folder/total.faa`;
+
+# OPTIMIZATION: Release sequence cache memory - no longer needed after motif validation
+undef %Seq_gn_cached;
+undef %Motif_regex;
 
 # Print out hmm result each tsv file
 `mkdir -p $output/METABOLIC_result_each_spreadsheet`;
@@ -703,7 +738,13 @@ print "\[$datestring\] Generating each hmm faa collection...\n";
 
 `mkdir -p $output/Each_HMM_Amino_Acid_Sequence`;
 
-foreach my $hmm (sort keys %Hmm_id){
+# OPTIMIZATION: Use parallel file writing for HMM sequence collections
+my @hmm_list = sort keys %Hmm_id;
+my $pm_write = Parallel::ForkManager->new($cpu_numbers);
+
+foreach my $hmm (@hmm_list){
+	my $pid = $pm_write->start and next;
+	
 	my %Hmm_faa_seq = (); #Store the faa seqs in a hmm
 	my %Hmm_gene_seq = (); # Store the gene seqs in a hmm	
 	foreach my $gn_id (sort keys %Hmmscan_hits){
@@ -712,10 +753,10 @@ foreach my $hmm (sort keys %Hmm_id){
 			foreach my $hit (@Hits){
 				my $seq_head = ">".$gn_id."~~".$hit;
 				if (exists $Total_faa_seq{$seq_head}){
-					$Hmm_faa_seq{$seq_head} = $Total_faa_seq{$seq_head}; #print "$Total_faa_seq{$seq_head}\n";
+					$Hmm_faa_seq{$seq_head} = $Total_faa_seq{$seq_head};
 				}
 				if (exists $Total_gene_seq{$seq_head}){
-					$Hmm_gene_seq{$seq_head} = $Total_gene_seq{$seq_head}; #print "$Total_faa_seq{$seq_head}\n";
+					$Hmm_gene_seq{$seq_head} = $Total_gene_seq{$seq_head};
 				}				
 			}
 
@@ -735,8 +776,15 @@ foreach my $hmm (sort keys %Hmm_id){
 			print OUT "$key\n$Hmm_gene_seq{$key}\n";
 		}
 		close OUT;
-	}	
+	}
+	
+	$pm_write->finish;
 }
+$pm_write->wait_all_children;
+
+# OPTIMIZATION: Release sequence hashes after collection files are written
+undef %Total_faa_seq;
+undef %Total_gene_seq;
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] Each hmm faa collection has been made\n";
@@ -981,25 +1029,10 @@ $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
 print "\[$datestring\] The KEGG identifier \(KO id\) seaching result is finished\n";
 
 
-# Run the dbCAN 
+# dbCAN2 searches were already run in parallel with hmmsearch
+# Now parse the results
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Searching CAZymes by dbCAN2...\n";
-
-`mkdir -p $output/intermediate_files/dbCAN2_Files`;
-open OUT, ">$output/tmp_run_dbCAN2.sh";
-open IN,"ls $input_protein_folder/*.faa |";
-while (<IN>){
-	chomp;
-	my $file = $_;
-	my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
-	print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out;";
-	print OUT "python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
-}
-close IN;
-close OUT;
-
-# Parallel run dbCAN2
-_run_parallel("$output/tmp_run_dbCAN2.sh", $cpu_numbers); `rm $output/tmp_run_dbCAN2.sh`;
+print "\[$datestring\] Parsing CAZyme results from dbCAN2...\n";
 
 my %dbCANout = (); # genome => hmmid => number
 my %dbCANout2 = (); # genome => hmmid => hits
@@ -1067,24 +1100,10 @@ foreach my $hmmid (sort keys %Hmm_dbCAN2_id){
 }
 close OUT;
 
-# Run the MEROPS
+# MEROPS Diamond search was already run in parallel with hmmsearch
+# Now parse the results
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Searching MEROPS peptidase...\n";
-
-`mkdir -p $output/intermediate_files/MEROPS_Files`;
-open OUT, ">$output/tmp_run_MEROPS.sh";
-open IN,"ls $input_protein_folder/*.faa |";
-while (<IN>){
-	chomp;
-	my $file = $_;
-	my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
-	print OUT "diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $file -o $output/intermediate_files/MEROPS_Files/$gn_id.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 1 2> /dev/null\n";
-}
-close IN;
-close OUT;
-
-# Parallel run the MEROPS
-_run_parallel("$output/tmp_run_MEROPS.sh", $cpu_numbers); `rm $output/tmp_run_MEROPS.sh`;
+print "\[$datestring\] Parsing MEROPS peptidase results...\n";
 
 my %MEROPS_map; # MER id => all line
 open IN, "$METABOLIC_dir/MEROPS/pepunit.lib";
@@ -1101,26 +1120,31 @@ close IN;
 my %MEROPSout = (); # genome => hmmid => number
 my %MEROPSout2 = (); # genome => hmmid => hits
 my %MEROPSid = (); # merops_id => 1 
-open IN, "ls $output/intermediate_files/MEROPS_Files/*.MEROPSout.m8 |";
-while (<IN>)
-{
-	my $file = $_;
-	my ($gn_id) = $file =~ /^$output\/intermediate_files\/MEROPS_Files\/(.+?)\.MEROPSout\.m8/;
-    open INN, "$file";
+
+# OPTIMIZATION: Parse single merged MEROPS output file
+my $merops_result_file = "$output/intermediate_files/MEROPS_Files/total.MEROPSout.m8";
+if (-e $merops_result_file) {
+    open INN, "$merops_result_file";
 	while (<INN>){
-	   my @tmp = split(/\t/,$_); 
-	   my ($meropsid) = $MEROPS_map{$tmp[1]} =~ /\#(.+?)\#/; $MEROPSid{$meropsid} = 1;
-	   my ($name) = $tmp[0];
-	   $MEROPSout{$gn_id}{$meropsid}++;
-	   if (!exists $MEROPSout2{$gn_id}{$meropsid}){
-                $MEROPSout2{$gn_id}{$meropsid} = $name;
-        }else{
-                $MEROPSout2{$gn_id}{$meropsid} .= "\;".$name;
-        }
+		chomp;
+		my @tmp = split(/\t/,$_);
+		my $seq_id = $tmp[0];
+		my $gn_id = $Seqid2Genomeid{$seq_id};
+		next unless $gn_id; # Skip if sequence not mapped to a genome
+		
+		my ($meropsid) = $MEROPS_map{$tmp[1]} =~ /\#(.+?)\#/; 
+		next unless $meropsid;
+		$MEROPSid{$meropsid} = 1;
+		
+		$MEROPSout{$gn_id}{$meropsid}++;
+		if (!exists $MEROPSout2{$gn_id}{$meropsid}){
+			$MEROPSout2{$gn_id}{$meropsid} = $seq_id;
+		}else{
+			$MEROPSout2{$gn_id}{$meropsid} .= "\;".$seq_id;
+		}
 	}
 	close INN;
 }
-close IN;
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] MEROPS peptidase searching is done\n";
