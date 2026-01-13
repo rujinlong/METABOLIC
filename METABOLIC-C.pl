@@ -301,7 +301,8 @@ if ($kofam_db_size eq "full"){
 }
 
 # Run hmmsearch on merged kofam database (single search instead of ~20k individual searches)
-print OUT "hmmsearch --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
+# OPTIMIZATION: --noali skips alignment output for faster execution
+print OUT "hmmsearch --noali --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
 
 # Run individual hmmsearch for METABOLIC-specific HMMs (non-kofam, typically ~100 files)
 foreach my $hmm (sort keys %Total_hmm2threshold){
@@ -787,40 +788,54 @@ close IN;
 # The hmm to ko id hash
 my %Hmm2ko = _get_hmm_2_KO_hash(%Hmm_table_temp); # Like: TIGR02694.hmm => K08355.hmm
 
+# OPTIMIZATION: Pre-compute genome KO sets to eliminate O(M×G×H) nested loop
+# This reduces complexity from O(module_steps × genomes × hmms) to O(module_steps × genomes)
+my %Genome_KO_hits = (); # genome_id => [ko_list]
+foreach my $gn_id (sort keys %Genome_id) {
+	my @ko_hits = ();
+	foreach my $hmm (keys %{$Hmmscan_result{$gn_id}}) {
+		next unless $Hmmscan_result{$gn_id}{$hmm}; # Skip if no hits
+		my $hmm_new = "";
+		if (exists $Hmm2ko{$hmm}) {
+			$hmm_new = $Hmm2ko{$hmm};
+		} elsif ($hmm =~ /^K\d\d\d\d\d/) {
+			$hmm_new = $hmm;
+		}
+		if ($hmm_new) {
+			my ($ko_id) = $hmm_new =~ /^(.+?)\.hmm/;
+			push @ko_hits, $ko_id if $ko_id;
+		}
+	}
+	$Genome_KO_hits{$gn_id} = \@ko_hits;
+}
+
 # To see whether a module step exists for a given genome
 my %Module_step_result = (); # M00804+01 => genome id => 1 / 0
 foreach my $m_step (sort keys %KEGG_module){
 	foreach my $gn_id (sort keys %Genome_id){		
 		my $k_string = $KEGG_module{$m_step}[0];
-		my @ko_hits = ();  # All the ko hits for this genome
-		foreach my $hmm (sort keys %Hmm_id){
-			my $hmm_new = ""; # transfer all the hmm id to ko id
-			if (exists $Hmm2ko{$hmm}){
-				$hmm_new = $Hmm2ko{$hmm}; 
-			}elsif (!exists $Hmm2ko{$hmm} and $hmm =~ /^K\d\d\d\d\d/){
-				$hmm_new = $hmm; 
-			}
-			my $hmm_new_wo_ext =  "";
-			if ($hmm_new){
-				($hmm_new_wo_ext) = $hmm_new =~ /^(.+?)\.hmm/;		
-			}
-			if ($hmm_new_wo_ext and $Hmmscan_result{$gn_id}{$hmm}){
-				push @ko_hits, $hmm_new_wo_ext;
-			}
-		}
+		# OPTIMIZATION: Use pre-computed KO hits instead of re-computing in inner loop
+		my @ko_hits = @{$Genome_KO_hits{$gn_id}};
 		$Module_step_result{$m_step}{$gn_id} = _determine_module_step($k_string, @ko_hits); 
 	}
 }
 
+# OPTIMIZATION: Pre-group module steps by module ID to avoid regex matching in loop
+my %Module_to_Steps = (); # module => [step1, step2, ...]
+foreach my $module_step (keys %Module_step_result) {
+	my ($module) = $module_step =~ /^(M\d+)/;
+	push @{$Module_to_Steps{$module}}, $module_step if $module;
+}
+
 my %Module_result = (); # M00804 => genome name => Absent / Present
-foreach my $module (sort keys  %KEGG_module2step_number){
+foreach my $module (sort keys %KEGG_module2step_number){
+	# OPTIMIZATION: Use pre-grouped steps instead of regex matching all steps
+	my @steps = @{$Module_to_Steps{$module} // []};
 	foreach my $gn_id (sort keys %Genome_id){
-		my $present_no = 0; 		
-		foreach my $module_step (sort keys %Module_step_result){
-			if ($module_step =~ /$module/){
-				if ($Module_step_result{$module_step}{$gn_id}){
-					$present_no += $Module_step_result{$module_step}{$gn_id};
-				}
+		my $present_no = 0;
+		foreach my $module_step (@steps) {
+			if ($Module_step_result{$module_step}{$gn_id}) {
+				$present_no += $Module_step_result{$module_step}{$gn_id};
 			}
 		}
 		
@@ -833,6 +848,14 @@ foreach my $module (sort keys  %KEGG_module2step_number){
 		}
 		
 	}	
+}
+
+# OPTIMIZATION: Pre-build reverse index from module to category for O(1) lookup
+my %Module2Cat = (); # module => category
+foreach my $cat (keys %Cat2module) {
+	foreach my $mod (split /\t/, $Cat2module{$cat}) {
+		$Module2Cat{$mod} = $cat if $mod;
+	}
 }
 
 # Print worksheet3
@@ -856,12 +879,8 @@ foreach my $module (sort keys %Module_result){
 	my @Worksheet3_body = ();
 	push @Worksheet3_body, $module;
 	push @Worksheet3_body, $KEGG_module2name{$module};
-	my $cat_4_module = ""; # The category name for module
-	foreach my $cat (sort keys %Cat2module){
-		if ($Cat2module{$cat} =~ /$module/){
-			$cat_4_module = $cat;
-		}
-	}
+	# OPTIMIZATION: Use pre-built reverse index instead of loop with regex
+	my $cat_4_module = $Module2Cat{$module} // "";
 	push @Worksheet3_body, $cat_4_module;
 	foreach my $gn_id (sort keys %Genome_id){
 		push @Worksheet3_body, $Module_result{$module}{$gn_id};
@@ -895,12 +914,8 @@ foreach my $module_step (sort keys %Module_step_result){
 	my ($module) = $module_step =~ /^(M.+?)\+/;
 	push @Worksheet4_body, $KEGG_module2name{$module};
 	push @Worksheet4_body, $KEGG_module{$module_step}[0];
-	my $cat_4_module = ""; # The category name for module
-	foreach my $cat (sort keys %Cat2module){
-		if ($Cat2module{$cat} =~ /$module/){
-			$cat_4_module = $cat;
-		}
-	}
+	# OPTIMIZATION: Use pre-built reverse index instead of loop with regex
+	my $cat_4_module = $Module2Cat{$module} // "";
 	push @Worksheet4_body, $cat_4_module; 
 	foreach my $gn_id (sort keys %Genome_id){
 		my $module_step_presence = "Absent";
