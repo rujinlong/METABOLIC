@@ -329,10 +329,21 @@ print "\[$datestring\] The hmmsearch is finished\n";
 my %Motif = _get_motif($motif_file); # protein id => motif sequences (DsrC => GPXKXXCXXXGXPXPXXCX)
 my %Motif_pair = _get_motif_pair($motif_pair_file); # dsrC => tusE
 
+# OPTIMIZATION: Pre-load all sequences from total.faa once for motif validation
+# This avoids repeated file reads in the parsing loop (major performance improvement)
+my %Seq_gn_cached = _store_seq("$input_protein_folder/total.faa");
+$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+print "[$datestring] Loaded " . scalar(keys %Seq_gn_cached) . " sequences for motif validation\n";
+
+# OPTIMIZATION: Collect candidates for batch motif pair checking
+# Instead of running hmmsearch for each candidate individually, we collect them first
+my @motif_pair_candidates = (); # Array of [gn_id, hmm, seq_id, hmm_basename]
+
 # Summarize hmmsearch result and print table
 my %Hmmscan_result = (); # genome_name => hmm => numbers
 my %Hmmscan_hits = (); # genome_name => hmm => hits
 my %Hmm_id = (); # hmm => 1 
+
 
 # Helper subroutine to process a hit and add to results
 sub _process_hit {
@@ -406,25 +417,15 @@ while (<IN>){
 							if ($tmp[8] >= $threshold){
 								my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
 								if (exists $Motif{$hmm_basename}){
-									my $seq; 
+									# OPTIMIZATION: Use cached sequences instead of re-reading file
 									my $motif = $Motif{$hmm_basename}; $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 								
-									my %Seq_gn = _store_seq("$input_protein_folder/total.faa");
-									$seq = $Seq_gn{">$tmp[0]"};
-									if ($seq =~ /$motif/){
+									my $seq = $Seq_gn_cached{">$tmp[0]"};
+									if ($seq && $seq =~ /$motif/){
 										_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 									}
 								}elsif(exists $Motif_pair{$hmm_basename}){
-									my $motif_hmm = "$METABOLIC_hmm_db_address/$hmm_basename.check.hmm";
-									my $motif_anti_hmm = "$METABOLIC_hmm_db_address/$Motif_pair{$hmm_basename}.check.hmm";
-									_get_1_from_input_faa("$input_protein_folder/total.faa",">$tmp[0]","$output/tmp.$hmm_basename.check.faa");							
-									`hmmsearch --cpu 1 --tblout $output/tmp.$hmm_basename.check.hmmsearch_result.txt $motif_hmm $output/tmp.$hmm_basename.check.faa`;
-									`hmmsearch --cpu 1 --tblout $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt $motif_anti_hmm $output/tmp.$hmm_basename.check.faa`;
-									my $motif_check_score = _get_check_score("$output/tmp.$hmm_basename.check.hmmsearch_result.txt"); 
-									my $motif_anti_check_score = _get_check_score("$output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt");
-									if ($motif_check_score >= $motif_anti_check_score and $motif_check_score != 0){
-										_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
-									}
-									`rm $output/tmp.$hmm_basename.check.faa $output/tmp.$hmm_basename.check.hmmsearch_result.txt $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt`;								
+									# OPTIMIZATION: Collect candidates for batch processing instead of running hmmsearch immediately
+									push @motif_pair_candidates, [$gn_id, $hmm, $tmp[0], $hmm_basename];
 								}else{
 									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
@@ -432,25 +433,15 @@ while (<IN>){
 						}else{
 							my ($hmm_basename) = $hmm =~ /^(.+?)\.hmm/; 
 							if (exists $Motif{$hmm_basename}){
-								my $seq;
+								# OPTIMIZATION: Use cached sequences instead of re-reading file
 								my $motif = $Motif{$hmm_basename};  $motif =~ s/X/\[ARNDCQEGHILKMFPSTWYV\]/g; 		
-								my %Seq_gn = _store_seq("$input_protein_folder/total.faa");
-								$seq = $Seq_gn{">$tmp[0]"};
-								if ($seq =~ /$motif/){
+								my $seq = $Seq_gn_cached{">$tmp[0]"};
+								if ($seq && $seq =~ /$motif/){
 									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 								}
 							}elsif(exists $Motif_pair{$hmm_basename}){
-								my $motif_hmm = "$METABOLIC_hmm_db_address/$hmm_basename.check.hmm";
-								my $motif_anti_hmm = "$METABOLIC_hmm_db_address/$Motif_pair{$hmm_basename}.check.hmm";
-								_get_1_from_input_faa("$input_protein_folder/total.faa",">$tmp[0]","$output/tmp.$hmm_basename.check.faa");
-								`hmmsearch --cpu 1 --tblout $output/tmp.$hmm_basename.check.hmmsearch_result.txt $motif_hmm $output/tmp.$hmm_basename.check.faa`;
-								`hmmsearch --cpu 1 --tblout $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt $motif_anti_hmm $output/tmp.$hmm_basename.check.faa`;
-								my $motif_check_score = _get_check_score("$output/tmp.$hmm_basename.check.hmmsearch_result.txt"); 
-								my $motif_anti_check_score = _get_check_score("$output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt");
-								if ($motif_check_score >= $motif_anti_check_score and $motif_check_score != 0){
-									_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
-								}
-								`rm $output/tmp.$hmm_basename.check.faa $output/tmp.$hmm_basename.check.hmmsearch_result.txt $output/tmp.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt`;
+								# OPTIMIZATION: Collect candidates for batch processing instead of running hmmsearch immediately
+								push @motif_pair_candidates, [$gn_id, $hmm, $tmp[0], $hmm_basename];
 							}else{
 								_process_hit($gn_id, $hmm, $tmp[0], \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
 							}
@@ -461,13 +452,110 @@ while (<IN>){
 }
 close IN;
 
+# OPTIMIZATION: Batch process motif pair candidates
+if (@motif_pair_candidates) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Processing " . scalar(@motif_pair_candidates) . " motif pair candidates in batch...\n";
+	
+	# Group candidates by hmm_basename to minimize hmmsearch calls
+	my %candidates_by_hmm = ();
+	foreach my $candidate (@motif_pair_candidates) {
+		my ($gn_id, $hmm, $seq_id, $hmm_basename) = @$candidate;
+		push @{$candidates_by_hmm{$hmm_basename}}, $candidate;
+	}
+	
+	# Process each group
+	foreach my $hmm_basename (sort keys %candidates_by_hmm) {
+		my @candidates = @{$candidates_by_hmm{$hmm_basename}};
+		
+		# Write all sequences for this hmm_basename to a single batch file
+		my $batch_faa = "$output/tmp_batch.$hmm_basename.check.faa";
+		open BATCH_OUT, ">$batch_faa" or next;
+		foreach my $candidate (@candidates) {
+			my $seq_id = $candidate->[2];
+			my $seq = $Seq_gn_cached{">$seq_id"};
+			if ($seq) {
+				print BATCH_OUT ">$seq_id\n$seq\n";
+			}
+		}
+		close BATCH_OUT;
+		
+		# Run hmmsearch on the batch file (once per hmm_basename instead of once per candidate)
+		my $motif_hmm = "$METABOLIC_hmm_db_address/$hmm_basename.check.hmm";
+		my $motif_anti_hmm = "$METABOLIC_hmm_db_address/$Motif_pair{$hmm_basename}.check.hmm";
+		my $batch_result = "$output/tmp_batch.$hmm_basename.check.hmmsearch_result.txt";
+		my $batch_anti_result = "$output/tmp_batch.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt";
+		
+		`hmmsearch --noali --cpu 1 --tblout $batch_result $motif_hmm $batch_faa 2>/dev/null`;
+		`hmmsearch --noali --cpu 1 --tblout $batch_anti_result $motif_anti_hmm $batch_faa 2>/dev/null`;
+		
+		# Parse batch results - get best score per sequence
+		my %motif_scores = ();
+		my %anti_scores = ();
+		
+		if (-e $batch_result) {
+			open BATCH_RES, "$batch_result";
+			while (<BATCH_RES>) {
+				chomp;
+				next if /^#/;
+				my $line = $_; $line =~ s/\s+/\t/g;
+				my @fields = split(/\t/, $line);
+				my $seq_id = $fields[0];
+				my $score = $fields[5];
+				if (!exists $motif_scores{$seq_id} || $score > $motif_scores{$seq_id}) {
+					$motif_scores{$seq_id} = $score;
+				}
+			}
+			close BATCH_RES;
+		}
+		
+		if (-e $batch_anti_result) {
+			open BATCH_RES, "$batch_anti_result";
+			while (<BATCH_RES>) {
+				chomp;
+				next if /^#/;
+				my $line = $_; $line =~ s/\s+/\t/g;
+				my @fields = split(/\t/, $line);
+				my $seq_id = $fields[0];
+				my $score = $fields[5];
+				if (!exists $anti_scores{$seq_id} || $score > $anti_scores{$seq_id}) {
+					$anti_scores{$seq_id} = $score;
+				}
+			}
+			close BATCH_RES;
+		}
+		
+		# Process candidates based on batch results
+		foreach my $candidate (@candidates) {
+			my ($gn_id, $hmm, $seq_id, $hb) = @$candidate;
+			my $motif_score = $motif_scores{$seq_id} // 0;
+			my $anti_score = $anti_scores{$seq_id} // 0;
+			
+			if ($motif_score >= $anti_score && $motif_score != 0) {
+				_process_hit($gn_id, $hmm, $seq_id, \%Hmmscan_result, \%Hmmscan_hits, \%Hmm_id);
+			}
+		}
+		
+		# Cleanup batch files
+		unlink $batch_faa if -e $batch_faa;
+		unlink $batch_result if -e $batch_result;
+		unlink $batch_anti_result if -e $batch_anti_result;
+	}
+	
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Batch motif pair processing completed\n";
+}
+
 `rm $input_protein_folder/total.faa`;
 
 # Print out hmm result each tsv file
 `mkdir -p $output/METABOLIC_result_each_spreadsheet`;
 
+
 # Print worksheet1
-open OUT, ">$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet1.tsv";
+# OPTIMIZATION: Use buffered output for better I/O performance
+open OUT, ">:encoding(UTF-8)", "$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet1.tsv" or die "Cannot open worksheet1: $!";
+{ my $old_fh = select(OUT); $| = 0; select($old_fh); }
 # Print head
 my @Hmm_table_head_worksheet1 = ();
 for(my $i=0; $i<=9; $i++){
@@ -530,7 +618,9 @@ foreach my $line_no (sort keys %Hmm_table_temp){
 close OUT;
 
 # Print worksheet2
-open OUT, ">$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet2.tsv";
+# OPTIMIZATION: Use buffered output for better I/O performance
+open OUT, ">:encoding(UTF-8)", "$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet2.tsv" or die "Cannot open worksheet2: $!";
+{ my $old_fh = select(OUT); $| = 0; select($old_fh); }
 # Print head
 my @Hmm_table_head_worksheet2 = ();
 for(my $i=0; $i<=2; $i++){
@@ -747,7 +837,9 @@ foreach my $module (sort keys  %KEGG_module2step_number){
 
 # Print worksheet3
 # Write the head of hmm result to worksheet3
-open OUT, ">$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet3.tsv";
+# OPTIMIZATION: Use buffered output for better I/O performance
+open OUT, ">:encoding(UTF-8)", "$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet3.tsv" or die "Cannot open worksheet3: $!";
+{ my $old_fh = select(OUT); $| = 0; select($old_fh); }
 # Print head
 my @Worksheet3_head = ();
 push @Worksheet3_head, "Module ID";
@@ -780,7 +872,9 @@ close OUT;
 
 # Print worksheet4
 # Write the head of hmm result to worksheet4
-open OUT, ">$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet4.tsv";
+# OPTIMIZATION: Use buffered output for better I/O performance
+open OUT, ">:encoding(UTF-8)", "$output/METABOLIC_result_each_spreadsheet/METABOLIC_result_worksheet4.tsv" or die "Cannot open worksheet4: $!";
+{ my $old_fh = select(OUT); $| = 0; select($old_fh); }
 # Print head
 my @Worksheet4_head = ();
 push @Worksheet4_head, "Module step";
