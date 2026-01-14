@@ -492,8 +492,8 @@ if (@motif_pair_candidates) {
 		my $batch_result = "$output/tmp_batch.$hmm_basename.check.hmmsearch_result.txt";
 		my $batch_anti_result = "$output/tmp_batch.$Motif_pair{$hmm_basename}.check.hmmsearch_result.txt";
 		
-		`hmmsearch --noali --cpu 1 --tblout $batch_result $motif_hmm $batch_faa 2>/dev/null`;
-		`hmmsearch --noali --cpu 1 --tblout $batch_anti_result $motif_anti_hmm $batch_faa 2>/dev/null`;
+		`hmmsearch --noali --cpu $cpu_numbers --tblout $batch_result $motif_hmm $batch_faa 2>/dev/null`;
+		`hmmsearch --noali --cpu $cpu_numbers --tblout $batch_anti_result $motif_anti_hmm $batch_faa 2>/dev/null`;
 		
 		# Parse batch results - get best score per sequence
 		my %motif_scores = ();
