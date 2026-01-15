@@ -76,6 +76,7 @@ use File::Basename;
 	-tax       or -taxonomy        [string]  To calculate MW-score contribution of microbial groups at the resolution of which taxonomical level (default: "phylum"; other options: "class", "order", "family", "genus", "species", and "bin" (MAG itself))
 	-o         or -output          [string]  The METABOLIC output folder (default: current address)
 	-test                          [string]  The option to test the performance of METABOLIC-G by 5 genomes; "true" or "false" to run the test option. You can use the -cpu option in addition to the -test option to specify how many cpus to use.
+	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'false')
 	
 =head1 INSTRUCTIONS
 
@@ -114,6 +115,7 @@ my $output = `pwd`; # The output folder
 my $taxonomy = "phylum"; # The taxonomy level to calculate MW-score table 
 my $version="METABOLIC-C.pl v4.0";
 my $test = "false";
+my $resume = "false"; # Resume from last checkpoint if previous run failed
 
 GetOptions(
 	'cpu|t=i' => \$cpu_numbers,
@@ -129,7 +131,8 @@ GetOptions(
 	'output|o=s' => \$output,
 	'help|h' => sub{system('perldoc', $0); exit;},
 	'v|version'=>sub{print $version."\n"; exit;},
-	'test=s' => \$test
+	'test=s' => \$test,
+	'resume=s' => \$resume
 ) or die("Getting options from the command line failed, please check your options");
 
 ## Pre-required files and documents
@@ -236,27 +239,47 @@ my %Total_hmm2threshold = (%METABOLIC_hmm2threshold, _get_kofam_db_KO_threshold(
 `mkdir -p $output/intermediate_files`;
 
 if ($input_genome_folder){
-	open OUT, ">$output/tmp_run_annotate.sh";
-	open OUT2, ">$output/tmp_run_annotate.sh.2";
-	open IN, "ls $input_genome_folder/*.fasta |";
-	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-	print "\[$datestring\] The Prodigal annotation is running...\n";
-	while (<IN>){
-		chomp;
-		my ($gn_id) = $_ =~ /^$input_genome_folder\/(.+?)\.fasta/;
-		print OUT "prodigal -i $input_genome_folder/$gn_id.fasta -a $input_genome_folder/$gn_id.faa -o $input_genome_folder/$gn_id.gff -f gff -p $prodigal_method -q\n";
-		print OUT2 "perl $METABOLIC_dir/Accessory_scripts/gff2fasta_mdf.pl -g $input_genome_folder/$gn_id.gff -f $input_genome_folder/$gn_id.fasta -o $input_genome_folder/$gn_id.gene\n";
+	# CHECKPOINT: Check if Prodigal annotation already completed
+	my @fasta_files = glob("$input_genome_folder/*.fasta");
+	my $all_annotated = 1;
+	if ($resume eq "true" && scalar(@fasta_files) > 0) {
+		foreach my $fasta (@fasta_files) {
+			my ($gn_id) = $fasta =~ /^$input_genome_folder\/(.+?)\.fasta/;
+			unless (_checkpoint_exists("$input_genome_folder/$gn_id.faa")) {
+				$all_annotated = 0;
+				last;
+			}
+		}
+	} else {
+		$all_annotated = 0;
 	}
-	close IN;
-	close OUT;
-	close OUT2;
 	
-	_run_parallel("$output/tmp_run_annotate.sh", $cpu_numbers); `rm $output/tmp_run_annotate.sh`;
-	_run_parallel("$output/tmp_run_annotate.sh.2", $cpu_numbers); `rm $output/tmp_run_annotate.sh.2`;	
+	if ($all_annotated) {
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+		print "[$datestring] Resuming: Skipping Prodigal annotation (checkpoint found)\n";
+	} else {
+		open OUT, ">$output/tmp_run_annotate.sh";
+		open OUT2, ">$output/tmp_run_annotate.sh.2";
+		open IN, "ls $input_genome_folder/*.fasta |";
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+		print "\[$datestring\] The Prodigal annotation is running...\n";
+		while (<IN>){
+			chomp;
+			my ($gn_id) = $_ =~ /^$input_genome_folder\/(.+?)\.fasta/;
+			print OUT "prodigal -i $input_genome_folder/$gn_id.fasta -a $input_genome_folder/$gn_id.faa -o $input_genome_folder/$gn_id.gff -f gff -p $prodigal_method -q\n";
+			print OUT2 "perl $METABOLIC_dir/Accessory_scripts/gff2fasta_mdf.pl -g $input_genome_folder/$gn_id.gff -f $input_genome_folder/$gn_id.fasta -o $input_genome_folder/$gn_id.gene\n";
+		}
+		close IN;
+		close OUT;
+		close OUT2;
+		
+		_run_parallel("$output/tmp_run_annotate.sh", $cpu_numbers); `rm $output/tmp_run_annotate.sh`;
+		_run_parallel("$output/tmp_run_annotate.sh.2", $cpu_numbers); `rm $output/tmp_run_annotate.sh.2`;	
 
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+		print "\[$datestring\] The Prodigal annotation is finished\n";
+	}
 	$input_protein_folder = $input_genome_folder;
-	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-	print "\[$datestring\] The Prodigal annotation is finished\n";
 }
 
 my %Genome_id = (); # genome id => 1
@@ -287,68 +310,84 @@ while (<IN>){
 	close IN_;
 }
 
-open OUT, ">$output/tmp_run_hmmsearch.sh";
-`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
+# CHECKPOINT: Check if hmmsearch/dbCAN2/MEROPS already completed
+my $hmm_checkpoint = "$output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt";
+my $merops_checkpoint = "$output/intermediate_files/MEROPS_Files/total.MEROPSout.m8";
+my $run_hmmsearch = 1;
 
-`mkdir -p $output/intermediate_files/Hmmsearch_Outputs`;
-
-# Determine which merged kofam database to use
-my $kofam_merged_db;
-if ($kofam_db_size eq "full"){
-	$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_all.hmm";
-} else {
-	$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_small.hmm";
+if ($resume eq "true" && _checkpoint_exists($hmm_checkpoint) && _checkpoint_exists($merops_checkpoint)) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping hmmsearch/dbCAN2/MEROPS (checkpoint found)\n";
+	$run_hmmsearch = 0;
 }
 
-# Run hmmsearch on merged kofam database (single search instead of ~20k individual searches)
-# OPTIMIZATION: --noali skips alignment output for faster execution
-print OUT "hmmsearch --noali --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
+if ($run_hmmsearch) {
+	open OUT, ">$output/tmp_run_hmmsearch.sh";
+	`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
 
-# Run individual hmmsearch for METABOLIC-specific HMMs (non-kofam, typically ~100 files)
-foreach my $hmm (sort keys %Total_hmm2threshold){
-	next if ($hmm =~ /^K\d\d\d\d\d/); # Skip kofam HMMs - handled by merged search
-	my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/;
-	if ($score_type eq "full"){
-		print OUT "hmmsearch -T $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
-	}else{
-		print OUT "hmmsearch --domT $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+	`mkdir -p $output/intermediate_files/Hmmsearch_Outputs`;
+
+	# Determine which merged kofam database to use
+	my $kofam_merged_db;
+	if ($kofam_db_size eq "full"){
+		$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_all.hmm";
+	} else {
+		$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_small.hmm";
 	}
+
+	# Run hmmsearch on merged kofam database (single search instead of ~20k individual searches)
+	# OPTIMIZATION: --noali skips alignment output for faster execution
+	print OUT "hmmsearch --noali --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
+
+	# Run individual hmmsearch for METABOLIC-specific HMMs (non-kofam, typically ~100 files)
+	foreach my $hmm (sort keys %Total_hmm2threshold){
+		next if ($hmm =~ /^K\d\d\d\d\d/); # Skip kofam HMMs - handled by merged search
+		my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/;
+		if ($score_type eq "full"){
+			print OUT "hmmsearch -T $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+		}else{
+			print OUT "hmmsearch --domT $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+		}
+	}
+
+	# OPTIMIZATION: Add dbCAN2 searches to the same batch for parallel execution
+	`mkdir -p $output/intermediate_files/dbCAN2_Files`;
+	open IN_FAA, "ls $input_protein_folder/*.faa |";
+	while (<IN_FAA>){
+		chomp;
+		my $file = $_;
+		next if ($file =~ /total\.faa$/); # Skip the merged file
+		my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
+		print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out 2>/dev/null; python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
+	}
+	close IN_FAA;
+
+	close OUT;
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] The hmmsearch/dbCAN2 is running with $cpu_numbers cpu threads...\n";
+
+	# OPTIMIZATION: Run MEROPS Diamond search in background while hmmsearch runs
+	`mkdir -p $output/intermediate_files/MEROPS_Files`;
+	my $merops_pid = fork();
+	if ($merops_pid == 0) {
+		# Child process - run MEROPS Diamond search
+		exec("diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $input_protein_folder/total.faa -o $output/intermediate_files/MEROPS_Files/total.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 4 2>/dev/null");
+		exit(0);
+	}
+
+	# Parallel run hmmsearch and dbCAN2
+	_run_parallel("$output/tmp_run_hmmsearch.sh", $cpu_numbers); `rm $output/tmp_run_hmmsearch.sh`;
+
+	# Wait for MEROPS Diamond to finish
+	waitpid($merops_pid, 0);
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] The hmmsearch is finished\n";
+} else {
+	# Still need to create total.faa for downstream processing
+	`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
 }
-
-# OPTIMIZATION: Add dbCAN2 searches to the same batch for parallel execution
-`mkdir -p $output/intermediate_files/dbCAN2_Files`;
-open IN_FAA, "ls $input_protein_folder/*.faa |";
-while (<IN_FAA>){
-	chomp;
-	my $file = $_;
-	next if ($file =~ /total\.faa$/); # Skip the merged file
-	my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
-	print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out 2>/dev/null; python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
-}
-close IN_FAA;
-
-close OUT;
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] The hmmsearch/dbCAN2 is running with $cpu_numbers cpu threads...\n";
-
-# OPTIMIZATION: Run MEROPS Diamond search in background while hmmsearch runs
-`mkdir -p $output/intermediate_files/MEROPS_Files`;
-my $merops_pid = fork();
-if ($merops_pid == 0) {
-	# Child process - run MEROPS Diamond search
-	exec("diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $input_protein_folder/total.faa -o $output/intermediate_files/MEROPS_Files/total.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 4 2>/dev/null");
-	exit(0);
-}
-
-# Parallel run hmmsearch and dbCAN2
-_run_parallel("$output/tmp_run_hmmsearch.sh", $cpu_numbers); `rm $output/tmp_run_hmmsearch.sh`;
-
-# Wait for MEROPS Diamond to finish
-waitpid($merops_pid, 0);
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] The hmmsearch is finished\n";
 
 # Store motif validation files
 my %Motif = _get_motif($motif_file); # protein id => motif sequences (DsrC => GPXKXXCXXXGXPXPXXCX)
@@ -1508,20 +1547,52 @@ if ($omic_reads_parameters){
 	close OUT;
 }
 
-`mkdir -p $output/newdir`;
-`Rscript $METABOLIC_dir/draw_sequential_reaction_diagram.R $output/METABOLIC_Figures_Input/Sequential_Transformation_input_1.txt $output/METABOLIC_Figures_Input/Sequential_Transformation_input_2.txt $R_mh_tsv $R_order_of_input_01 $R_order_of_input_02 $output/newdir 2> /dev/null`;
-`mv $output/newdir/Bar_plot/bar_plot_input_1.pdf $output/METABOLIC_Figures/Sequential_transformation_01.pdf`;
-`mv $output/newdir/Bar_plot/bar_plot_input_2.pdf $output/METABOLIC_Figures/Sequential_transformation_02.pdf`;
-`rm -r $output/newdir`;
+# CHECKPOINT: Check if Sequential Reaction Diagrams already generated
+my $seq_diagram_checkpoint = "$output/METABOLIC_Figures/Sequential_transformation_01.pdf";
+my $run_seq_diagram = 1;
 
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Drawing metabolic handoff diagrams finished\n";
+if ($resume eq "true" && _checkpoint_exists($seq_diagram_checkpoint)) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping sequential reaction diagrams (checkpoint found)\n";
+	$run_seq_diagram = 0;
+}
+
+if ($run_seq_diagram) {
+	`mkdir -p $output/newdir`;
+	`Rscript $METABOLIC_dir/draw_sequential_reaction_diagram.R $output/METABOLIC_Figures_Input/Sequential_Transformation_input_1.txt $output/METABOLIC_Figures_Input/Sequential_Transformation_input_2.txt $R_mh_tsv $R_order_of_input_01 $R_order_of_input_02 $output/newdir 2> /dev/null`;
+	`mv $output/newdir/Bar_plot/bar_plot_input_1.pdf $output/METABOLIC_Figures/Sequential_transformation_01.pdf`;
+	`mv $output/newdir/Bar_plot/bar_plot_input_2.pdf $output/METABOLIC_Figures/Sequential_transformation_02.pdf`;
+	`rm -r $output/newdir`;
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] Drawing metabolic handoff diagrams finished\n";
+}
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] Drawing energy flow chart...\n";
 
 # Store the bin category
-system ("gtdbtk classify_wf --cpus $cpu_numbers -x fasta --genome_dir $input_genome_folder --skip_ani_screen --out_dir $output/intermediate_files/gtdbtk_Genome_files 2> /dev/null");
+# CHECKPOINT: Check if GTDB-Tk classification already done
+# Note: Later code checks for summary file to read results, so we just need to skip the running command
+my $gtdbtk_checkpoint = "$output/intermediate_files/gtdbtk_Genome_files/gtdbtk.bac120.summary.tsv"; # Checking bac120 as primary indicator
+# However, archaea might be ar53. But if the directory exists and has summaries, we assume done?
+# Safer to check if the directory exists and is not empty, OR if we rely on the specific summary files.
+# The code below only checks for bac120 or ar53 specifically to read them.
+# So if we skip execution, and the files are missing, the code below will fail to read but won't crash (just empty results).
+# But we want to run if files are missing.
+# Let's check for either bac120 OR ar53 summary file.
+my $gtdbtk_checkpoint_ar = "$output/intermediate_files/gtdbtk_Genome_files/gtdbtk.ar53.summary.tsv";
+
+my $run_gtdbtk = 1;
+if ($resume eq "true" && (_checkpoint_exists($gtdbtk_checkpoint) || _checkpoint_exists($gtdbtk_checkpoint_ar))) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping GTDB-Tk (checkpoint found)\n";
+	$run_gtdbtk = 0;
+}
+
+if ($run_gtdbtk) {
+	system ("gtdbtk classify_wf --cpus $cpu_numbers -x fasta --genome_dir $input_genome_folder --skip_ani_screen --out_dir $output/intermediate_files/gtdbtk_Genome_files 2> /dev/null");
+}
 
 my %Bin2Cat = (); # bin => category, for instance, Acidimicrobiia_bacterium_UWMA-0264 => [0] Actinobacteriota (phylum) [1] XX (class) [2] XX (order) [3] XX (family) [4] XX (genus) [5] XX (species) [6] XX (bin)
 
@@ -1700,235 +1771,262 @@ foreach my $gn (sort keys %Hmmscan_result){
 	}
 }
 
-open OUT, ">$output/METABOLIC_Figures_Input/Metabolic_Sankey_diagram_input.txt";
-foreach my $gn_n_pth (sort keys %Hash_gn_n_pth){
-	print OUT "$Total_R_community_coverage{$gn_n_pth}\n";
+# CHECKPOINT: Check if Sankey/Network Diagrams already generated
+my $sankey_checkpoint = "$output/METABOLIC_Figures/Metabolic_Sankey_diagram.pdf";
+my $network_checkpoint = "$output/METABOLIC_Figures/Functional_network_figures";
+my $run_community_diagrams = 1;
+
+if ($resume eq "true" && _checkpoint_exists($sankey_checkpoint)) {
+	# We assume if Sankey exists, Network exists too as they are sequential
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping community diagrams (checkpoint found)\n";
+	$run_community_diagrams = 0;
 }
-close OUT;
 
-open OUT, ">$output/METABOLIC_Figures_Input/Functional_network_input.txt";
-print OUT "#Genome\tStep1\tStep2\tTaxonomic Group\tCoverage value\(average\)\n";
-foreach my $gn_n_pair (sort keys %Total_R_community_coverage2){
-	print OUT "$gn_n_pair\t$Total_R_community_coverage2{$gn_n_pair}\n";
+if ($run_community_diagrams) {
+	open OUT, ">$output/METABOLIC_Figures_Input/Metabolic_Sankey_diagram_input.txt";
+	foreach my $gn_n_pth (sort keys %Hash_gn_n_pth){
+		print OUT "$Total_R_community_coverage{$gn_n_pth}\n";
+	}
+	close OUT;
+
+	open OUT, ">$output/METABOLIC_Figures_Input/Functional_network_input.txt";
+	print OUT "#Genome\tStep1\tStep2\tTaxonomic Group\tCoverage value\(average\)\n";
+	foreach my $gn_n_pair (sort keys %Total_R_community_coverage2){
+		print OUT "$gn_n_pair\t$Total_R_community_coverage2{$gn_n_pair}\n";
+	}
+	close OUT;
+
+	`Rscript $METABOLIC_dir/draw_metabolic_Sankey_diagram.R $output/METABOLIC_Figures_Input/Metabolic_Sankey_diagram_input.txt $output/Output_energy_flow 2> /dev/null`;
+	`mv $output/Output_energy_flow/Energy_plot/network.plot.pdf   $output/METABOLIC_Figures/Metabolic_Sankey_diagram.pdf; rm -r $output/Output_energy_flow`;
+
+	`Rscript $METABOLIC_dir/draw_functional_network_diagram.R $output/METABOLIC_Figures_Input/Functional_network_input.txt $output/OutputFolder_Energy 2> /dev/null`;
+	`mv $output/OutputFolder_Energy/network_plot $output/METABOLIC_Figures/Functional_network_figures; rm -r $output/OutputFolder_Energy`;
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] Drawing energy flow chart finished\n";
 }
-close OUT;
-
-`Rscript $METABOLIC_dir/draw_metabolic_Sankey_diagram.R $output/METABOLIC_Figures_Input/Metabolic_Sankey_diagram_input.txt $output/Output_energy_flow 2> /dev/null`;
-`mv $output/Output_energy_flow/Energy_plot/network.plot.pdf   $output/METABOLIC_Figures/Metabolic_Sankey_diagram.pdf; rm -r $output/Output_energy_flow`;
-
-`Rscript $METABOLIC_dir/draw_functional_network_diagram.R $output/METABOLIC_Figures_Input/Functional_network_input.txt $output/OutputFolder_Energy 2> /dev/null`;
-`mv $output/OutputFolder_Energy/network_plot $output/METABOLIC_Figures/Functional_network_figures; rm -r $output/OutputFolder_Energy`;
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Drawing energy flow chart finished\n";
 
 
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] Calculating MW-score ...\n";
 
-### To calculate MW-score
-# Store MW_score_reaction_table
-my %MW_functions = (); # func => hmms
-my %MW_function_hmm_ids = ();
-open IN, "$MW_score_reaction_table"; # read the MW_score_reaction table
-while (<IN>){
-	chomp;
-	if (!/^#/){
-		my @tmp = split (/\t/);
-		$MW_functions{$tmp[0]} = $tmp[2];
-		if ($tmp[2] !~ /\;/){
-			my @tmp2 = split (/\,/,$tmp[2]);
-			foreach my $key (@tmp2){
-				$MW_function_hmm_ids{$key} = 1;
-			}
-		}elsif ($tmp[2] =~ /\;/){
-			my @tmp2 = split (/\;/,$tmp[2]);
-			foreach my $key (@tmp2){
-				my @tmp3 = split (/\,/,$key);
-				foreach my $key2 (@tmp3){
-					if ($key2 !~ /NO/){
-						$MW_function_hmm_ids{$key2} = 1;
+# CHECKPOINT: Check if MW-score already calculated
+# Note: MW-score calculation is the last step.
+my $mw_checkpoint = "$output/MW-score_result/MW-score_result.txt";
+my $run_mw_score = 1;
+
+if ($resume eq "true" && _checkpoint_exists($mw_checkpoint)) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping MW-score calculation (checkpoint found)\n";
+	$run_mw_score = 0;
+}
+
+if ($run_mw_score) {
+	### To calculate MW-score
+	# Store MW_score_reaction_table
+	my %MW_functions = (); # func => hmms
+	my %MW_function_hmm_ids = ();
+	open IN, "$MW_score_reaction_table"; # read the MW_score_reaction table
+	while (<IN>){
+		chomp;
+		if (!/^#/){
+			my @tmp = split (/\t/);
+			$MW_functions{$tmp[0]} = $tmp[2];
+			if ($tmp[2] !~ /\;/){
+				my @tmp2 = split (/\,/,$tmp[2]);
+				foreach my $key (@tmp2){
+					$MW_function_hmm_ids{$key} = 1;
+				}
+			}elsif ($tmp[2] =~ /\;/){
+				my @tmp2 = split (/\;/,$tmp[2]);
+				foreach my $key (@tmp2){
+					my @tmp3 = split (/\,/,$key);
+					foreach my $key2 (@tmp3){
+						if ($key2 !~ /NO/){
+							$MW_function_hmm_ids{$key2} = 1;
+						}
 					}
 				}
 			}
 		}
 	}
-}
-close IN;
+	close IN;
 
-# Get MW_score_reaction_table result
-my %MW_score_hash = (); # pathway => gn => 1 or 0
-foreach my $gn (sort keys %Hmmscan_result){
-	foreach my $key (sort keys %MW_functions){
-		$MW_score_hash{$key}{$gn} = 0;
-		my $hmms = $MW_functions{$key};
-		if ($hmms !~ /\;/){
-			foreach my $hmm_id (sort keys %MW_function_hmm_ids){
-				if ($hmms =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-					$MW_score_hash{$key}{$gn} = 1; 
-				}
-			}
-		}elsif ($hmms =~ /\;/){
-			my ($hmms_1,$hmms_2) = $hmms =~ /^(.+?)\;(.+?)$/;
-			if ($hmms_2 !~ /NO/){
-				my $logic1 = 0; my $logic2 = 0;  # print "$gn\n";
+	# Get MW_score_reaction_table result
+	my %MW_score_hash = (); # pathway => gn => 1 or 0
+	foreach my $gn (sort keys %Hmmscan_result){
+		foreach my $key (sort keys %MW_functions){
+			$MW_score_hash{$key}{$gn} = 0;
+			my $hmms = $MW_functions{$key};
+			if ($hmms !~ /\;/){
 				foreach my $hmm_id (sort keys %MW_function_hmm_ids){
-					if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic1 = 1;	
-					}
-					if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic2 = 1;	
+					if ($hmms =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+						$MW_score_hash{$key}{$gn} = 1; 
 					}
 				}
-				if ($logic1 and $logic2){
-					$MW_score_hash{$key}{$gn} = 1;
-				}
-			}elsif ($hmms_2 =~ /NO/){
-				my $logic1 = 0; my $logic2 = 1;
-				foreach my $hmm_id (sort keys %MW_function_hmm_ids){
-					if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic1 = 1;	
-					}			
-					if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){  # if $hmms_2 contains $hmm_id , and the genome has $hmm_id hit(s), then it will be false (0)
-						$logic2 = 0;	
-					}		
-				}
-				if ($logic1 and $logic2){
-					$MW_score_hash{$key}{$gn} = 1;
+			}elsif ($hmms =~ /\;/){
+				my ($hmms_1,$hmms_2) = $hmms =~ /^(.+?)\;(.+?)$/;
+				if ($hmms_2 !~ /NO/){
+					my $logic1 = 0; my $logic2 = 0;  # print "$gn\n";
+					foreach my $hmm_id (sort keys %MW_function_hmm_ids){
+						if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic1 = 1;	
+						}
+						if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic2 = 1;	
+						}
+					}
+					if ($logic1 and $logic2){
+						$MW_score_hash{$key}{$gn} = 1;
+					}
+				}elsif ($hmms_2 =~ /NO/){
+					my $logic1 = 0; my $logic2 = 1;
+					foreach my $hmm_id (sort keys %MW_function_hmm_ids){
+						if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic1 = 1;	
+						}			
+						if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){  # if $hmms_2 contains $hmm_id , and the genome has $hmm_id hit(s), then it will be false (0)
+							$logic2 = 0;	
+						}		
+					}
+					if ($logic1 and $logic2){
+						$MW_score_hash{$key}{$gn} = 1;
+					}
 				}
 			}
 		}
 	}
-}
 
-my %MW_score_community_coverage = (); # genome\tpathway => category \t pathway \t genome coverage percentage
-if ($omic_reads_parameters){
-	my %Genome_cov = %Genome_cov_constant;
-	foreach my $pth (sort keys %MW_score_hash){
-		my $gn_cov_percentage = 0; 
-		foreach my $gn (sort keys %Hmmscan_result){
-			if ($Genome_cov{$gn} and $MW_score_hash{$pth}{$gn}){
-				$gn_cov_percentage = $Genome_cov{$gn}; 
+	my %MW_score_community_coverage = (); # genome\tpathway => category \t pathway \t genome coverage percentage
+	if ($omic_reads_parameters){
+		my %Genome_cov = %Genome_cov_constant;
+		foreach my $pth (sort keys %MW_score_hash){
+			my $gn_cov_percentage = 0; 
+			foreach my $gn (sort keys %Hmmscan_result){
+				if ($Genome_cov{$gn} and $MW_score_hash{$pth}{$gn}){
+					$gn_cov_percentage = $Genome_cov{$gn}; 
+					my $cat = "";
+					my $tax_code = $Tax2code{$taxonomy};
+					$cat = $Bin2Cat{$gn}[$tax_code];
+					my $gn_n_pth = "$gn\t$pth"; 
+					$MW_score_community_coverage{$gn_n_pth} = "$cat\t$pth\t$gn_cov_percentage";
+					
+				}
+			}
+		}		
+	}
+
+	my %MW_score_community_coverage2 = (); # $genome\tpath pair => cat \t  coverage percentage average
+	foreach my $gn (sort keys %Hmmscan_result){
+		my %Path = (); # path => 1
+		foreach my $gn_n_pth (sort keys %MW_score_community_coverage){
+			if ($gn_n_pth =~ /$gn\t/){
+				my @tmp = split (/\t/,$gn_n_pth);
+				$Path{$tmp[1]} = 1;
+			}
+		}
+		my @Path_keys = sort keys %Path;
+		for(my $i=0; $i<=$#Path_keys; $i++){
+			for(my $j = $i+1; $j<=$#Path_keys; $j++){
+				my $pair = "$Path_keys[$i]\t$Path_keys[$j]";
+				my $coverage = 0;
+				my @tmp1 = split (/\t/, $MW_score_community_coverage{"$gn\t$Path_keys[$i]"});
+				my @tmp2 = split (/\t/, $MW_score_community_coverage{"$gn\t$Path_keys[$j]"});
+				$coverage = ($tmp1[2] + $tmp2[2]) / 2;
 				my $cat = "";
 				my $tax_code = $Tax2code{$taxonomy};
 				$cat = $Bin2Cat{$gn}[$tax_code];
-				my $gn_n_pth = "$gn\t$pth"; 
-				$MW_score_community_coverage{$gn_n_pth} = "$cat\t$pth\t$gn_cov_percentage";
-				
+				$MW_score_community_coverage2{"$gn\t$pair"} = $cat."\t".$coverage;
 			}
 		}
-	}		
-}
+	}
 
-my %MW_score_community_coverage2 = (); # $genome\tpath pair => cat \t  coverage percentage average
-foreach my $gn (sort keys %Hmmscan_result){
-	my %Path = (); # path => 1
-	foreach my $gn_n_pth (sort keys %MW_score_community_coverage){
-		if ($gn_n_pth =~ /$gn\t/){
-			my @tmp = split (/\t/,$gn_n_pth);
-			$Path{$tmp[1]} = 1;
+	`mkdir -p $output/MW-score_result`;
+	open OUT, ">$output/MW-score_result/MW-score_result_table_input.txt";
+	print OUT "#Genome\tFunc1\tFunc2\tTaxonomic Group\tCoverage value\(average\)\n";
+	foreach my $gn_n_pair (sort keys %MW_score_community_coverage2){
+		print OUT "$gn_n_pair\t$MW_score_community_coverage2{$gn_n_pair}\n";
+	}
+	close OUT;
+
+	# Read the "MW-score_result_table_input.txt" and make the "MW-score_result.txt", which is the final result of MW-score
+	my %Input = (); # whole line => [0]  Acidimicrobiia_bacterium_UWMA-0264	[1]  C-S-01:Organic carbon oxidation	[2] C-S-04:Acetate oxidation	[3] Actinobacteriota	[4] 0.038328883
+	open IN, "$output/MW-score_result/MW-score_result_table_input.txt";
+	while (<IN>){
+		chomp;
+		if (!/\#/){
+			my @tmp = split (/\t/,$_);
+			$Input{$_}[0] = $tmp[0];
+			$Input{$_}[1] = $tmp[1];
+			$Input{$_}[2] = $tmp[2];
+			$Input{$_}[3] = $tmp[3];
+			$Input{$_}[4] = $tmp[4];
 		}
 	}
-	my @Path_keys = sort keys %Path;
-	for(my $i=0; $i<=$#Path_keys; $i++){
-		for(my $j = $i+1; $j<=$#Path_keys; $j++){
-			my $pair = "$Path_keys[$i]\t$Path_keys[$j]";
-			my $coverage = 0;
-			my @tmp1 = split (/\t/, $MW_score_community_coverage{"$gn\t$Path_keys[$i]"});
-			my @tmp2 = split (/\t/, $MW_score_community_coverage{"$gn\t$Path_keys[$j]"});
-			$coverage = ($tmp1[2] + $tmp2[2]) / 2;
-			my $cat = "";
-			my $tax_code = $Tax2code{$taxonomy};
-			$cat = $Bin2Cat{$gn}[$tax_code];
-			$MW_score_community_coverage2{"$gn\t$pair"} = $cat."\t".$coverage;
+	close IN;
+
+	my %Output1 = (); # func. => category => summed coverage
+	my %Output2 = (); # func. =>  summed coverage
+	my %Cat_2 =(); # This hash of Cat_2 is only used in MW-score calculating
+	foreach my $key (sort keys %Input){
+		$Output1{$Input{$key}[1]}{$Input{$key}[3]} += $Input{$key}[4];
+		$Output1{$Input{$key}[2]}{$Input{$key}[3]} += $Input{$key}[4];
+		$Cat_2{$Input{$key}[3]} = 1;
+		$Output2{$Input{$key}[1]} += $Input{$key}[4];
+		$Output2{$Input{$key}[2]} += $Input{$key}[4];
+	}
+
+	my %Output3 = (); # The contribution percentage for each function
+	my $sum_cov_for_output2 = 0;
+	foreach my $func (sort keys %Output2){
+		$sum_cov_for_output2 += $Output2{$func};
+	}
+
+	foreach my $func (sort keys %Output2){
+		my $var = ($Output2{$func} / $sum_cov_for_output2) * 100;
+		$Output3{$func} = sprintf "%.1f",$var;
+	}
+
+	my %Output4 = (); # func. => category => percentage  
+	# The func. and each category contribution percentage table
+	foreach my $func (sort keys %Output1){
+		foreach my $cat (sort keys %Cat_2){
+			my $var = 0;
+			if ($Output2{$func} and $Output1{$func}{$cat}){
+				$var = ($Output1{$func}{$cat} / $Output2{$func}) * 100;
+			}
+			$Output4{$func}{$cat} = sprintf "%.1f",$var;
 		}
 	}
-}
 
-`mkdir -p $output/MW-score_result`;
-open OUT, ">$output/MW-score_result/MW-score_result_table_input.txt";
-print OUT "#Genome\tFunc1\tFunc2\tTaxonomic Group\tCoverage value\(average\)\n";
-foreach my $gn_n_pair (sort keys %MW_score_community_coverage2){
-	print OUT "$gn_n_pair\t$MW_score_community_coverage2{$gn_n_pair}\n";
-}
-close OUT;
-
-# Read the "MW-score_result_table_input.txt" and make the "MW-score_result.txt", which is the final result of MW-score
-my %Input = (); # whole line => [0]  Acidimicrobiia_bacterium_UWMA-0264	[1]  C-S-01:Organic carbon oxidation	[2] C-S-04:Acetate oxidation	[3] Actinobacteriota	[4] 0.038328883
-open IN, "$output/MW-score_result/MW-score_result_table_input.txt";
-while (<IN>){
-	chomp;
-	if (!/\#/){
-		my @tmp = split (/\t/,$_);
-		$Input{$_}[0] = $tmp[0];
-		$Input{$_}[1] = $tmp[1];
-		$Input{$_}[2] = $tmp[2];
-		$Input{$_}[3] = $tmp[3];
-		$Input{$_}[4] = $tmp[4];
+	open OUT, ">$output/MW-score_result/MW-score_result.txt";
+	my $row=join("\t", sort keys %Cat_2);
+	print OUT "Function\tMW-score for each function\t$row\n";
+	foreach my $tmp1 (sort keys %Output4)
+	{
+			print OUT $tmp1."\t";
+			print OUT $Output3{$tmp1}."\t";
+			my @tmp = ();
+			foreach my $tmp2 (sort keys %Cat_2)
+			{
+					if (exists $Output4{$tmp1}{$tmp2})
+					{
+							push @tmp, $Output4{$tmp1}{$tmp2};
+					}
+					else
+					{
+							push @tmp,"0"
+					}
+			}
+			print OUT join("\t",@tmp)."\n";
 	}
-}
-close IN;
+	close OUT;
 
-my %Output1 = (); # func. => category => summed coverage
-my %Output2 = (); # func. =>  summed coverage
-my %Cat_2 =(); # This hash of Cat_2 is only used in MW-score calculating
-foreach my $key (sort keys %Input){
-	$Output1{$Input{$key}[1]}{$Input{$key}[3]} += $Input{$key}[4];
-	$Output1{$Input{$key}[2]}{$Input{$key}[3]} += $Input{$key}[4];
-	$Cat_2{$Input{$key}[3]} = 1;
-	$Output2{$Input{$key}[1]} += $Input{$key}[4];
-	$Output2{$Input{$key}[2]} += $Input{$key}[4];
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] Calculating MW-score is done\n";
+	$endtime = $datestring;
 }
-
-my %Output3 = (); # The contribution percentage for each function
-my $sum_cov_for_output2 = 0;
-foreach my $func (sort keys %Output2){
-	$sum_cov_for_output2 += $Output2{$func};
-}
-
-foreach my $func (sort keys %Output2){
-	my $var = ($Output2{$func} / $sum_cov_for_output2) * 100;
-	$Output3{$func} = sprintf "%.1f",$var;
-}
-
-my %Output4 = (); # func. => category => percentage  
-# The func. and each category contribution percentage table
-foreach my $func (sort keys %Output1){
-	foreach my $cat (sort keys %Cat_2){
-		my $var = 0;
-		if ($Output2{$func} and $Output1{$func}{$cat}){
-			$var = ($Output1{$func}{$cat} / $Output2{$func}) * 100;
-		}
-		$Output4{$func}{$cat} = sprintf "%.1f",$var;
-	}
-}
-
-open OUT, ">$output/MW-score_result/MW-score_result.txt";
-my $row=join("\t", sort keys %Cat_2);
-print OUT "Function\tMW-score for each function\t$row\n";
-foreach my $tmp1 (sort keys %Output4)
-{
-        print OUT $tmp1."\t";
-		print OUT $Output3{$tmp1}."\t";
-        my @tmp = ();
-        foreach my $tmp2 (sort keys %Cat_2)
-        {
-                if (exists $Output4{$tmp1}{$tmp2})
-                {
-                        push @tmp, $Output4{$tmp1}{$tmp2};
-                }
-                else
-                {
-                        push @tmp,"0"
-                }
-        }
-        print OUT join("\t",@tmp)."\n";
-}
-close OUT;
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Calculating MW-score is done\n";
-$endtime = $datestring;
 }
 
 my $duration = time - $starttime_raw;
@@ -1957,6 +2055,11 @@ close OUT;
 
 
 ##Subroutines
+sub _checkpoint_exists {
+	my ($marker_file) = @_;
+	return (-e $marker_file && -s $marker_file > 0);
+}
+
 sub parse_duration {
     use integer;
     sprintf("%02d:%02d:%02d", $_[0]/3600, $_[0]/60%60, $_[0]%60);
@@ -2086,91 +2189,145 @@ sub _get_gene_seq{
 sub _get_Genome_coverge{
 	my $reads = $_[0];
 	my $folder = $_[1]; # The input_genome_folder
-	#Cat all the genes
-	my %Seq = (); my $head = "";
-	open __IN, "ls $folder/*.gene | ";
-	while (<__IN>){
-		chomp;
-		my $file = $_;
-		my ($seq_name) = $file =~ /$folder\/(.+?)\.gene/; 
-		open __INN, $file;
-		while (<__INN>){
-			chomp;
-			if (/>/){
-				my $head_old = $_;
-				my $head_old_2;
-				if ($head_old =~ /\s/){
-					($head_old_2) = $head_old =~ />(.+?)\s/;
-				}else{
-					($head_old_2) = $head_old =~ />(.+?)$/;
-				}
-				$head = ">".$seq_name."~~".$head_old_2;
-				$Seq{$head} = "";
-			}else{
-				$Seq{$head} .= $_;
-			}
-		}
-		close __INN;
-	}
-	close __IN;
-	
-	open __OUT, ">$output/All_gene_collections.gene";
-	foreach my $key (sort keys %Seq){
-		print __OUT "$key\n$Seq{$key}\n";
-	}
-	close __OUT;
-	
-	system ("bowtie2-build --quiet $output/All_gene_collections.gene $output/All_gene_collections.gene.scaffold");
-	my %Reads = (); my $i = 1;
-	open __IN, "$reads";
-	while (<__IN>){
-		chomp;
-		next if /^#/ or /^\s*$/; # Skip comments and blank lines
+	# CHECKPOINT: Check if genome coverage already calculated
+	my $depth_checkpoint = "$output/All_gene_collections_mapped.depth.txt";
+	my $run_coverage = 1;
+
+	if ($resume eq "true" && _checkpoint_exists($depth_checkpoint)) {
+		my $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+		print "[$datestring] Resuming: Skipping Bowtie2/CoverM (checkpoint found)\n";
+		$run_coverage = 0;
 		
-		my @tmp = split (/\,/,$_);
-		my $tmp_link = "";
-		if ($test ne "true"){
-			$tmp_link = $tmp[0]."\t".$tmp[1];
-		}else{
-			$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[0]."\t"."$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[1];
-		}
-		$Reads{$tmp_link} = $i;
-		$i++;
-	}
-	close __IN;
-	
-	my %Read_seq_numbers = (); # read pair => read seq number
-	my $average_read_seq_number = 0; # The average read
-	open OUT__,">$output/tmp_calculate_depth.sh";
-	foreach my $key (sort keys %Reads){
-		my $j = $Reads{$key};
-		my @tmp = split (/\t/,$key); 
+		# Need to calculate average read seq number for metaT normalization if needed
 		if ($omic_reads_type eq "metaT"){
-			my $seq_number = `cat $tmp[0] | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4 * 2; $Read_seq_numbers{$key} = $seq_number;
+			# This is tricky without re-reading the reads, but usually average_read_seq_number is used later.
+			# However, in the parsing code below:
+			# my $transcript_coverage = $tmp[$i] * (1000000  / $average_read_seq_number) / $geneLength;
+			# So we DO need $average_read_seq_number.
+			# If we resume, we might need to recalculate it or store it.
+			# For now, let's recalculate it if we are resuming metaT, which is fast compared to mapping.
+			
+			my %Reads = (); my $i = 1;
+			open __IN, "$reads";
+			while (<__IN>){
+				chomp;
+				next if /^#/ or /^\s*$/;
+				my @tmp = split (/\,/,$_);
+				my $tmp_link = "";
+				if ($test ne "true"){
+					$tmp_link = $tmp[0]."\t".$tmp[1];
+				}else{
+					$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[0]."\t"."$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[1];
+				}
+				$Reads{$tmp_link} = $i;
+				$i++;
+			}
+			close __IN;
+			
+			my %Read_seq_numbers = ();
+			foreach my $key (sort keys %Reads){
+				my @tmp = split (/\t/,$key); 
+				my $seq_number = `cat $tmp[0] | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4 * 2; $Read_seq_numbers{$key} = $seq_number;
+			}
+			
+			foreach my $key (sort keys %Read_seq_numbers){
+				$average_read_seq_number += $Read_seq_numbers{$key};
+			}	
+			my @Read_seq_numbers_keys = keys %Read_seq_numbers;
+			$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers_keys);
 		}
-		print OUT__ "bowtie2 -x $output/All_gene_collections.gene.scaffold -1 $tmp[0] -2 $tmp[1] -S $output/All_gene_collections_mapped.$j.sam -p $cpu_numbers --quiet;";
-		print OUT__ "samtools view -bS $output/All_gene_collections_mapped.$j.sam > $output/All_gene_collections_mapped.$j.bam -@ $cpu_numbers 2> /dev/null;";
-		print OUT__ "mkdir -p $output/sambamba_tmpfiles.$j; sambamba sort  $output/All_gene_collections_mapped.$j.bam --tmpdir $output/sambamba_tmpfiles.$j -o $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
-		print OUT__ "samtools index $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
-		print OUT__ "samtools flagstat $output/All_gene_collections_mapped.$j.sorted.bam > $output/All_gene_collections_mapped.$j.sorted.stat 2> /dev/null;";
-		print OUT__ "rm $output/All_gene_collections_mapped.$j.sam $output/All_gene_collections_mapped.$j.bam;rm -r $output/sambamba_tmpfiles.$j\n";
 	}
-	close OUT__;
-	
-	foreach my $key (sort keys %Read_seq_numbers){
-		$average_read_seq_number += $Read_seq_numbers{$key};
-	}	
-	
-	if ($omic_reads_type eq "metaT"){
-		my @Read_seq_numbers = keys %Read_seq_numbers;
-		$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers) ;
+
+	if ($run_coverage) {
+		#Cat all the genes
+		my %Seq = (); my $head = "";
+		open __IN, "ls $folder/*.gene | ";
+		while (<__IN>){
+			chomp;
+			my $file = $_;
+			my ($seq_name) = $file =~ /$folder\/(.+?)\.gene/; 
+			open __INN, $file;
+			while (<__INN>){
+				chomp;
+				if (/>/){
+					my $head_old = $_;
+					my $head_old_2;
+					if ($head_old =~ /\s/){
+						($head_old_2) = $head_old =~ />(.+?)\s/;
+					}else{
+						($head_old_2) = $head_old =~ />(.+?)$/;
+					}
+					$head = ">".$seq_name."~~".$head_old_2;
+					$Seq{$head} = "";
+				}else{
+					$Seq{$head} .= $_;
+				}
+			}
+			close __INN;
+		}
+		close __IN;
+		
+		open __OUT, ">$output/All_gene_collections.gene";
+		foreach my $key (sort keys %Seq){
+			print __OUT "$key\n$Seq{$key}\n";
+		}
+		close __OUT;
+		
+		system ("bowtie2-build --quiet $output/All_gene_collections.gene $output/All_gene_collections.gene.scaffold");
+		my %Reads = (); my $i = 1;
+		open __IN, "$reads";
+		while (<__IN>){
+			chomp;
+			next if /^#/ or /^\s*$/; # Skip comments and blank lines
+			
+			my @tmp = split (/\,/,$_);
+			my $tmp_link = "";
+			if ($test ne "true"){
+				$tmp_link = $tmp[0]."\t".$tmp[1];
+			}else{
+				$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[0]."\t"."$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$tmp[1];
+			}
+			$Reads{$tmp_link} = $i;
+			$i++;
+		}
+		close __IN;
+		
+		my %Read_seq_numbers = (); # read pair => read seq number
+		# Global $average_read_seq_number is used but we need to declare logic here 
+		# (Wait, $average_read_seq_number was declared at definition level line 2187, we can update it)
+		# NOTE: Earlier I declared 'my $average_read_seq_number = 0;' at line 2187
+		
+		open OUT__,">$output/tmp_calculate_depth.sh";
+		foreach my $key (sort keys %Reads){
+			my $j = $Reads{$key};
+			my @tmp = split (/\t/,$key); 
+			if ($omic_reads_type eq "metaT"){
+				my $seq_number = `cat $tmp[0] | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4 * 2; $Read_seq_numbers{$key} = $seq_number;
+			}
+			print OUT__ "bowtie2 -x $output/All_gene_collections.gene.scaffold -1 $tmp[0] -2 $tmp[1] -S $output/All_gene_collections_mapped.$j.sam -p $cpu_numbers --quiet;";
+			print OUT__ "samtools view -bS $output/All_gene_collections_mapped.$j.sam > $output/All_gene_collections_mapped.$j.bam -@ $cpu_numbers 2> /dev/null;";
+			print OUT__ "mkdir -p $output/sambamba_tmpfiles.$j; sambamba sort  $output/All_gene_collections_mapped.$j.bam --tmpdir $output/sambamba_tmpfiles.$j -o $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
+			print OUT__ "samtools index $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
+			print OUT__ "samtools flagstat $output/All_gene_collections_mapped.$j.sorted.bam > $output/All_gene_collections_mapped.$j.sorted.stat 2> /dev/null;";
+			print OUT__ "rm $output/All_gene_collections_mapped.$j.sam $output/All_gene_collections_mapped.$j.bam;rm -r $output/sambamba_tmpfiles.$j\n";
+		}
+		close OUT__;
+		
+		foreach my $key (sort keys %Read_seq_numbers){
+			$average_read_seq_number += $Read_seq_numbers{$key};
+		}	
+		
+		if ($omic_reads_type eq "metaT"){
+			my @Read_seq_numbers = keys %Read_seq_numbers;
+			$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers) ;
+		}
+		
+		# Parallel run calculate coverage
+		_run_parallel("$output/tmp_calculate_depth.sh", $i); `rm $output/tmp_calculate_depth.sh`;
+		
+		system ("coverm contig --methods metabat --bam-files  $output/All_gene_collections_mapped.*.sorted.bam > $output/All_gene_collections_mapped.depth.txt 2> /dev/null");
+		`rm $output/*.bt2;rm $output/All_gene_collections.gene; rm $output/*.bam; rm $output/*.sorted.stat;rm $output/*.bai`;
 	}
-	
-	# Parallel run calculate coverage
-	_run_parallel("$output/tmp_calculate_depth.sh", $i); `rm $output/tmp_calculate_depth.sh`;
-	
-	system ("coverm contig --methods metabat --bam-files  $output/All_gene_collections_mapped.*.sorted.bam > $output/All_gene_collections_mapped.depth.txt 2> /dev/null");
-	`rm $output/*.bt2;rm $output/All_gene_collections.gene; rm $output/*.bam; rm $output/*.sorted.stat;rm $output/*.bai`;
 	
 	my %h = (); # average => bin => all gene coverage values
 	my @h_head = ();  
@@ -2260,98 +2417,146 @@ sub _get_Genome_coverge{
 sub _get_Genome_coverge_for_long_reads{
 	my $reads = $_[0];
 	my $folder = $_[1]; # The input_genome_folder
-	# Cat all the genes
-	my %Seq = (); my $head = "";
-	open __IN, "ls $folder/*.gene | ";
-	while (<__IN>){
-		chomp;
-		my $file = $_;
-		my ($seq_name) = $file =~ /$folder\/(.+?)\.gene/; 
-		open __INN, $file;
-		while (<__INN>){
-			chomp;
-			if (/>/){
-				my $head_old = $_;
-				my $head_old_2;
-				if ($head_old =~ /\s/){
-					($head_old_2) = $head_old =~ />(.+?)\s/;
+	# CHECKPOINT: Check if genome coverage already calculated
+	my $depth_checkpoint = "$output/All_gene_collections_mapped.depth.txt";
+	my $run_coverage = 1;
+
+	if ($resume eq "true" && _checkpoint_exists($depth_checkpoint)) {
+		my $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+		print "[$datestring] Resuming: Skipping Minimap2/CoverM (checkpoint found)\n";
+		$run_coverage = 0;
+		
+		# Need to calculate average read seq number for metaT normalization if needed
+		if ($omic_reads_type eq "metaT"){
+			my %Reads = (); my $i = 1;
+			open __IN, "$reads";
+			while (<__IN>){
+				chomp;
+				next if /^#/ or /^\s*$/;
+				my $tmp_link = "";
+				if ($test ne "true"){
+					$tmp_link = $_;
 				}else{
-					($head_old_2) = $head_old =~ />(.+?)$/;
+					$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$_;
 				}
-				$head = ">".$seq_name."~~".$head_old_2;
-				$Seq{$head} = "";
-			}else{
-				$Seq{$head} .= $_;
+				$Reads{$tmp_link} = $i;
+				$i++;
+			}
+			close __IN;
+			
+			my %Read_seq_numbers = ();
+			foreach my $key (sort keys %Reads){
+				my $j = $Reads{$key};
+				if ($omic_reads_type eq "metaT"){
+					my $seq_number = `cat $key | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4; $Read_seq_numbers{$key} = $seq_number;
+				}
+			}
+			
+			foreach my $key (sort keys %Read_seq_numbers){
+				$average_read_seq_number += $Read_seq_numbers{$key};
+			}	
+			
+			if ($omic_reads_type eq "metaT"){
+				my @Read_seq_numbers = keys %Read_seq_numbers;
+				$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers) ;
 			}
 		}
-		close __INN;
 	}
-	close __IN;
-	
-	open __OUT, ">$output/All_gene_collections.gene";
-	foreach my $key (sort keys %Seq){
-		print __OUT "$key\n$Seq{$key}\n";
-	}
-	close __OUT;
-	
-	my %Reads = (); my $i = 1;
-	open __IN, "$reads";
-	while (<__IN>){
-		chomp;
-		next if /^#/ or /^\s*$/; # Skip comments and blank lines
+
+	if ($run_coverage) {
+		# Cat all the genes
+		my %Seq = (); my $head = "";
+		open __IN, "ls $folder/*.gene | ";
+		while (<__IN>){
+			chomp;
+			my $file = $_;
+			my ($seq_name) = $file =~ /$folder\/(.+?)\.gene/; 
+			open __INN, $file;
+			while (<__INN>){
+				chomp;
+				if (/>/){
+					my $head_old = $_;
+					my $head_old_2;
+					if ($head_old =~ /\s/){
+						($head_old_2) = $head_old =~ />(.+?)\s/;
+					}else{
+						($head_old_2) = $head_old =~ />(.+?)$/;
+					}
+					$head = ">".$seq_name."~~".$head_old_2;
+					$Seq{$head} = "";
+				}else{
+					$Seq{$head} .= $_;
+				}
+			}
+			close __INN;
+		}
+		close __IN;
 		
-		my $tmp_link = "";
-		if ($test ne "true"){
-			$tmp_link = $_;
-		}else{
-			$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$_;
+		open __OUT, ">$output/All_gene_collections.gene";
+		foreach my $key (sort keys %Seq){
+			print __OUT "$key\n$Seq{$key}\n";
 		}
-		$Reads{$tmp_link} = $i;
-		$i++;
-	}
-	close __IN;
-	
-	my %Read_seq_numbers = (); # read pair => read seq number
-	my $average_read_seq_number = 0; # The average read
-	open OUT__,">$output/tmp_calculate_depth.sh";
-	foreach my $key (sort keys %Reads){
-		my $j = $Reads{$key};
+		close __OUT;
+		
+		my %Reads = (); my $i = 1;
+		open __IN, "$reads";
+		while (<__IN>){
+			chomp;
+			next if /^#/ or /^\s*$/; # Skip comments and blank lines
+			
+			my $tmp_link = "";
+			if ($test ne "true"){
+				$tmp_link = $_;
+			}else{
+				$tmp_link = "$METABOLIC_dir/METABOLIC_test_files/METABOLIC_test_reads/".$_;
+			}
+			$Reads{$tmp_link} = $i;
+			$i++;
+		}
+		close __IN;
+		
+		my %Read_seq_numbers = (); # read pair => read seq number
+		# Global $average_read_seq_number handled via scope
+		open OUT__,">$output/tmp_calculate_depth.sh";
+		foreach my $key (sort keys %Reads){
+			my $j = $Reads{$key};
+			if ($omic_reads_type eq "metaT"){
+				my $seq_number = `cat $key | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4; $Read_seq_numbers{$key} = $seq_number;
+			}
+			my $ax_input = "";
+			if ($sequencing_type eq 'pacbio'){
+				$ax_input = 'map-pb';
+			}elsif($sequencing_type eq 'nanopore'){
+				$ax_input = 'map-ont';
+			}elsif($sequencing_type eq 'pacbio_hifi'){
+				$ax_input = 'map-hifi';
+			}elsif($sequencing_type eq 'pacbio_asm20'){
+				$ax_input = 'asm20';
+			}
+			print OUT__ "minimap2 -ax $ax_input $output/All_gene_collections.gene $key > $output/All_gene_collections_mapped.$j.sam;";
+			print OUT__ "samtools view -bS $output/All_gene_collections_mapped.$j.sam > $output/All_gene_collections_mapped.$j.bam -@ $cpu_numbers 2> /dev/null;";
+			print OUT__ "mkdir -p $output/sambamba_tmpfiles.$j; sambamba sort  $output/All_gene_collections_mapped.$j.bam --tmpdir $output/sambamba_tmpfiles.$j -o $output/All_gene_collections_mapped.$j.sorted.bam -q;";
+			print OUT__ "samtools index $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
+			print OUT__ "samtools flagstat $output/All_gene_collections_mapped.$j.sorted.bam > $output/All_gene_collections_mapped.$j.sorted.stat 2> /dev/null;";
+			print OUT__ "#rm $output/All_gene_collections_mapped.$j.sam $output/All_gene_collections_mapped.$j.bam;rm -r $output/sambamba_tmpfiles.$j\n";
+		}
+		close OUT__;
+		
+		foreach my $key (sort keys %Read_seq_numbers){
+			$average_read_seq_number += $Read_seq_numbers{$key};
+		}	
+		
 		if ($omic_reads_type eq "metaT"){
-			my $seq_number = `cat $key | wc -l`; chomp $seq_number; $seq_number = $seq_number / 4; $Read_seq_numbers{$key} = $seq_number;
+			my @Read_seq_numbers = keys %Read_seq_numbers;
+			$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers) ;
 		}
-		my $ax_input = "";
-		if ($sequencing_type eq 'pacbio'){
-			$ax_input = 'map-pb';
-		}elsif($sequencing_type eq 'nanopore'){
-			$ax_input = 'map-ont';
-		}elsif($sequencing_type eq 'pacbio_hifi'){
-			$ax_input = 'map-hifi';
-		}elsif($sequencing_type eq 'pacbio_asm20'){
-			$ax_input = 'asm20';
-		}
-		print OUT__ "minimap2 -ax $ax_input $output/All_gene_collections.gene $key > $output/All_gene_collections_mapped.$j.sam;";
-		print OUT__ "samtools view -bS $output/All_gene_collections_mapped.$j.sam > $output/All_gene_collections_mapped.$j.bam -@ $cpu_numbers 2> /dev/null;";
-		print OUT__ "mkdir -p $output/sambamba_tmpfiles.$j; sambamba sort  $output/All_gene_collections_mapped.$j.bam --tmpdir $output/sambamba_tmpfiles.$j -o $output/All_gene_collections_mapped.$j.sorted.bam -q;";
-		print OUT__ "samtools index $output/All_gene_collections_mapped.$j.sorted.bam 2> /dev/null;";
-		print OUT__ "samtools flagstat $output/All_gene_collections_mapped.$j.sorted.bam > $output/All_gene_collections_mapped.$j.sorted.stat 2> /dev/null;";
-		print OUT__ "#rm $output/All_gene_collections_mapped.$j.sam $output/All_gene_collections_mapped.$j.bam;rm -r $output/sambamba_tmpfiles.$j\n";
+		
+		# Parallel run calculate coverage
+		_run_parallel("$output/tmp_calculate_depth.sh", $i); `rm $output/tmp_calculate_depth.sh`;
+		
+		system ("coverm contig --methods metabat --bam-files  $output/All_gene_collections_mapped.*.sorted.bam > $output/All_gene_collections_mapped.depth.txt 2> /dev/null");
+		`#rm $output/All_gene_collections.gene; rm $output/*.bam; rm $output/*.sorted.stat;rm $output/*.bai`;
 	}
-	close OUT__;
-	
-	foreach my $key (sort keys %Read_seq_numbers){
-		$average_read_seq_number += $Read_seq_numbers{$key};
-	}	
-	
-	if ($omic_reads_type eq "metaT"){
-		my @Read_seq_numbers = keys %Read_seq_numbers;
-		$average_read_seq_number = $average_read_seq_number / (scalar @Read_seq_numbers) ;
-	}
-	
-	# Parallel run calculate coverage
-	_run_parallel("$output/tmp_calculate_depth.sh", $i); `rm $output/tmp_calculate_depth.sh`;
-	
-	system ("coverm contig --methods metabat --bam-files  $output/All_gene_collections_mapped.*.sorted.bam > $output/All_gene_collections_mapped.depth.txt 2> /dev/null");
-	`#rm $output/All_gene_collections.gene; rm $output/*.bam; rm $output/*.sorted.stat;rm $output/*.bai`;
 	
 	my %h = (); # average => bin => all gene coverage values
 	my @h_head = ();  

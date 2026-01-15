@@ -67,6 +67,7 @@ use File::Basename;
 	-p         or -prodigal-method [string]  "meta" or "single" for prodigal to annotate the orf
 	-o         or -output          [string]  The METABOLIC output folder (default: current address)
 	-test                          [string]  The option to test the performance of METABOLIC-G by 5 genomes; "true" or "false" to run the test option. You can use the -cpu option in addition to the -test option to specify how many cpus to use.
+	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'false')
 	
 =head1 INSTRUCTIONS
 
@@ -102,6 +103,7 @@ my $kofam_db_size = "full"; # The full kofam size
 my $output = `pwd`; # The output folder 
 my $version="METABOLIC-G.pl v4.0";
 my $test = "false";
+my $resume = "false"; # Resume from last checkpoint if previous run failed
 
 GetOptions(
 	'cpu|t=i' => \$cpu_numbers,
@@ -113,7 +115,8 @@ GetOptions(
 	'output|o=s' => \$output,
 	'help|h' => sub{system('perldoc', $0); exit;},
 	'v|version'=>sub{print $version."\n"; exit;},
-	'test=s' => \$test
+	'test=s' => \$test,
+	'resume=s' => \$resume
 ) or die("Getting options from the command line failed, please check your options");
 
 ## Pre-required files and documents
@@ -204,27 +207,47 @@ my %Total_hmm2threshold = (%METABOLIC_hmm2threshold, _get_kofam_db_KO_threshold(
 `mkdir -p $output/intermediate_files`;
 
 if ($input_genome_folder){
-	open OUT, ">$output/tmp_run_annotate.sh";
-	open OUT2, ">$output/tmp_run_annotate.sh.2";
-	open IN, "ls $input_genome_folder/*.fasta |";
-	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-	print "\[$datestring\] The Prodigal annotation is running...\n";
-	while (<IN>){
-		chomp;
-		my ($gn_id) = $_ =~ /^$input_genome_folder\/(.+?)\.fasta/;
-		print OUT "prodigal -i $input_genome_folder/$gn_id.fasta -a $input_genome_folder/$gn_id.faa -o $input_genome_folder/$gn_id.gff -f gff -p $prodigal_method -q\n";
-		print OUT2 "perl $METABOLIC_dir/Accessory_scripts/gff2fasta_mdf.pl -g $input_genome_folder/$gn_id.gff -f $input_genome_folder/$gn_id.fasta -o $input_genome_folder/$gn_id.gene\n";
+	# CHECKPOINT: Check if Prodigal annotation already completed
+	my @fasta_files = glob("$input_genome_folder/*.fasta");
+	my $all_annotated = 1;
+	if ($resume eq "true" && scalar(@fasta_files) > 0) {
+		foreach my $fasta (@fasta_files) {
+			my ($gn_id) = $fasta =~ /^$input_genome_folder\/(.+?)\.fasta/;
+			unless (_checkpoint_exists("$input_genome_folder/$gn_id.faa")) {
+				$all_annotated = 0;
+				last;
+			}
+		}
+	} else {
+		$all_annotated = 0;
 	}
-	close IN;
-	close OUT;
-	close OUT2;
 	
-	_run_parallel("$output/tmp_run_annotate.sh", $cpu_numbers); `rm $output/tmp_run_annotate.sh`;
-	_run_parallel("$output/tmp_run_annotate.sh.2", $cpu_numbers); `rm $output/tmp_run_annotate.sh.2`;	
+	if ($all_annotated) {
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+		print "[$datestring] Resuming: Skipping Prodigal annotation (checkpoint found)\n";
+	} else {
+		open OUT, ">$output/tmp_run_annotate.sh";
+		open OUT2, ">$output/tmp_run_annotate.sh.2";
+		open IN, "ls $input_genome_folder/*.fasta |";
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+		print "\[$datestring\] The Prodigal annotation is running...\n";
+		while (<IN>){
+			chomp;
+			my ($gn_id) = $_ =~ /^$input_genome_folder\/(.+?)\.fasta/;
+			print OUT "prodigal -i $input_genome_folder/$gn_id.fasta -a $input_genome_folder/$gn_id.faa -o $input_genome_folder/$gn_id.gff -f gff -p $prodigal_method -q\n";
+			print OUT2 "perl $METABOLIC_dir/Accessory_scripts/gff2fasta_mdf.pl -g $input_genome_folder/$gn_id.gff -f $input_genome_folder/$gn_id.fasta -o $input_genome_folder/$gn_id.gene\n";
+		}
+		close IN;
+		close OUT;
+		close OUT2;
+		
+		_run_parallel("$output/tmp_run_annotate.sh", $cpu_numbers); `rm $output/tmp_run_annotate.sh`;
+		_run_parallel("$output/tmp_run_annotate.sh.2", $cpu_numbers); `rm $output/tmp_run_annotate.sh.2`;	
 
+		$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+		print "\[$datestring\] The Prodigal annotation is finished\n";
+	}
 	$input_protein_folder = $input_genome_folder;
-	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-	print "\[$datestring\] The Prodigal annotation is finished\n";
 }
 
 my %Genome_id = (); # genome id => 1
@@ -260,69 +283,85 @@ while (<IN>){
 	close IN_;
 }
 
-open OUT, ">$output/tmp_run_hmmsearch.sh";
-`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
+# CHECKPOINT: Check if hmmsearch/dbCAN2/MEROPS already completed
+my $hmm_checkpoint = "$output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt";
+my $merops_checkpoint = "$output/intermediate_files/MEROPS_Files/total.MEROPSout.m8";
+my $run_hmmsearch = 1;
 
-`mkdir -p $output/intermediate_files/Hmmsearch_Outputs`;
-
-# Determine which merged kofam database to use
-my $kofam_merged_db;
-if ($kofam_db_size eq "full"){
-	$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_all.hmm";
-} else {
-	$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_small.hmm";
+if ($resume eq "true" && _checkpoint_exists($hmm_checkpoint) && _checkpoint_exists($merops_checkpoint)) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping hmmsearch/dbCAN2/MEROPS (checkpoint found)\n";
+	$run_hmmsearch = 0;
 }
 
-# Run hmmsearch on merged kofam database (single search instead of ~20k individual searches)
-# OPTIMIZATION: --noali skips alignment output for faster execution
-print OUT "hmmsearch --noali --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
+if ($run_hmmsearch) {
+	open OUT, ">$output/tmp_run_hmmsearch.sh";
+	`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
 
-# Run individual hmmsearch for METABOLIC-specific HMMs (non-kofam, typically ~100 files)
-foreach my $hmm (sort keys %Total_hmm2threshold){
-	next if ($hmm =~ /^K\d\d\d\d\d/); # Skip kofam HMMs - handled by merged search
-	my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/;
-	if ($score_type eq "full"){
-		print OUT "hmmsearch -T $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
-	}else{
-		print OUT "hmmsearch --domT $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+	`mkdir -p $output/intermediate_files/Hmmsearch_Outputs`;
+
+	# Determine which merged kofam database to use
+	my $kofam_merged_db;
+	if ($kofam_db_size eq "full"){
+		$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_all.hmm";
+	} else {
+		$kofam_merged_db = "$METABOLIC_dir/kofam_database/kofam_small.hmm";
 	}
+
+	# Run hmmsearch on merged kofam database (single search instead of ~20k individual searches)
+	# OPTIMIZATION: --noali skips alignment output for faster execution
+	print OUT "hmmsearch --noali --cpu $cpu_numbers --tblout $output/intermediate_files/Hmmsearch_Outputs/kofam_merged.hmmsearch_result.txt $kofam_merged_db $input_protein_folder/total.faa\n";
+
+	# Run individual hmmsearch for METABOLIC-specific HMMs (non-kofam, typically ~100 files)
+	foreach my $hmm (sort keys %Total_hmm2threshold){
+		next if ($hmm =~ /^K\d\d\d\d\d/); # Skip kofam HMMs - handled by merged search
+		my ($threshold,$score_type) = $Total_hmm2threshold{$hmm} =~ /^(.+?)\|(.+?)$/;
+		if ($score_type eq "full"){
+			print OUT "hmmsearch -T $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+		}else{
+			print OUT "hmmsearch --domT $threshold --cpu 1 --tblout $output/intermediate_files/Hmmsearch_Outputs/$hmm.total.hmmsearch_result.txt $METABOLIC_hmm_db_address/$hmm $input_protein_folder/total.faa\n";
+		}
+	}
+
+	# OPTIMIZATION: Add dbCAN2 searches to the same batch for parallel execution
+	`mkdir -p $output/intermediate_files/dbCAN2_Files`;
+	open IN_FAA, "ls $input_protein_folder/*.faa |";
+	while (<IN_FAA>){
+		chomp;
+		my $file = $_;
+		next if ($file =~ /total\.faa$/); # Skip the merged file
+		my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
+		print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out 2>/dev/null; python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
+	}
+	close IN_FAA;
+
+	close OUT;
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] The hmmsearch/dbCAN2 is running with $cpu_numbers cpu threads...\n";
+
+	# OPTIMIZATION: Run MEROPS Diamond search in background while hmmsearch runs
+	# This allows Diamond to utilize remaining CPU cycles
+	`mkdir -p $output/intermediate_files/MEROPS_Files`;
+	my $merops_pid = fork();
+	if ($merops_pid == 0) {
+		# Child process - run MEROPS Diamond search
+		exec("diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $input_protein_folder/total.faa -o $output/intermediate_files/MEROPS_Files/total.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 4 2>/dev/null");
+		exit(0);
+	}
+
+	# Parallel run hmmsearch and dbCAN2
+	_run_parallel("$output/tmp_run_hmmsearch.sh", $cpu_numbers); `rm $output/tmp_run_hmmsearch.sh`;
+
+	# Wait for MEROPS Diamond to finish
+	waitpid($merops_pid, 0);
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] The hmmsearch is finished\n";
+} else {
+	# Still need to create total.faa for downstream processing
+	`cat $input_protein_folder/*.faa > $input_protein_folder/faa.total; mv $input_protein_folder/faa.total $input_protein_folder/total.faa`;
 }
-
-# OPTIMIZATION: Add dbCAN2 searches to the same batch for parallel execution
-`mkdir -p $output/intermediate_files/dbCAN2_Files`;
-open IN_FAA, "ls $input_protein_folder/*.faa |";
-while (<IN_FAA>){
-	chomp;
-	my $file = $_;
-	next if ($file =~ /total\.faa$/); # Skip the merged file
-	my ($gn_id) = $file =~ /^$input_protein_folder\/(.+?)\.faa/;
-	print OUT "hmmscan --domtblout $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm --cpu 1 $METABOLIC_dir/dbCAN2/dbCAN-fam-HMMs.txt $file > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out 2>/dev/null; python $METABOLIC_dir/Accessory_scripts/hmmscan-parser-dbCANmeta.py $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm > $output/intermediate_files/dbCAN2_Files/$gn_id.dbCAN2.out.dm.ps\n";
-}
-close IN_FAA;
-
-close OUT;
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] The hmmsearch/dbCAN2 is running with $cpu_numbers cpu threads...\n";
-
-# OPTIMIZATION: Run MEROPS Diamond search in background while hmmsearch runs
-# This allows Diamond to utilize remaining CPU cycles
-`mkdir -p $output/intermediate_files/MEROPS_Files`;
-my $merops_pid = fork();
-if ($merops_pid == 0) {
-	# Child process - run MEROPS Diamond search
-	exec("diamond blastp -d $METABOLIC_dir/MEROPS/pepunit.db -q $input_protein_folder/total.faa -o $output/intermediate_files/MEROPS_Files/total.MEROPSout.m8 -k 1 -e 1e-10 --query-cover 80 --id 50 --quiet -p 4 2>/dev/null");
-	exit(0);
-}
-
-# Parallel run hmmsearch and dbCAN2
-_run_parallel("$output/tmp_run_hmmsearch.sh", $cpu_numbers); `rm $output/tmp_run_hmmsearch.sh`;
-
-# Wait for MEROPS Diamond to finish
-waitpid($merops_pid, 0);
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] The hmmsearch is finished\n";
 
 # Store motif validation files
 my %Motif = _get_motif($motif_file); # protein id => motif sequences (dsrC => GPXKXXCXXXGXPXPXXCX)
@@ -1167,98 +1206,110 @@ close OUT;
 $datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
 print "\[$datestring\] METABOLIC table has been generated\n";
 
-# Draw element cycling diagrams
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Drawing element cycling diagrams...\n";
+# CHECKPOINT: Check if Element Cycling Diagrams already generated
+my $diagram_checkpoint = "$output/METABOLIC_Figures/Nutrient_Cycling_Diagrams";
+my $run_diagrams = 1;
 
-# Store R pathways
-my %R_pathways = (); # step => hmms
-my %R_hmm_ids = ();
-open IN, "$R_pathways";
-while (<IN>){
-	chomp;
-	my @tmp = split (/\t/);
-	$R_pathways{$tmp[0]} = $tmp[1];
-	if ($tmp[1] !~ /\;/){
-		my @tmp2 = split (/\,/,$tmp[1]);
-		foreach my $key (@tmp2){
-			$R_hmm_ids{$key} = 1;
-		}
-	}elsif ($tmp[1] =~ /\;/){
-		my @tmp2 = split (/\;/,$tmp[1]);
-		foreach my $key (@tmp2){
-			my @tmp3 = split (/\,/,$key);
-			foreach my $key2 (@tmp3){
-				if ($key2 !~ /NO/){
-					$R_hmm_ids{$key2} = 1;
+if ($resume eq "true" && -d $diagram_checkpoint && _checkpoint_exists($diagram_checkpoint)) {
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime;
+	print "[$datestring] Resuming: Skipping element cycling diagrams (checkpoint found)\n";
+	$run_diagrams = 0;
+}
+
+if ($run_diagrams) {
+	# Draw element cycling diagrams
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] Drawing element cycling diagrams...\n";
+
+	# Store R pathways
+	my %R_pathways = (); # step => hmms
+	my %R_hmm_ids = ();
+	open IN, "$R_pathways";
+	while (<IN>){
+		chomp;
+		my @tmp = split (/\t/);
+		$R_pathways{$tmp[0]} = $tmp[1];
+		if ($tmp[1] !~ /\;/){
+			my @tmp2 = split (/\,/,$tmp[1]);
+			foreach my $key (@tmp2){
+				$R_hmm_ids{$key} = 1;
+			}
+		}elsif ($tmp[1] =~ /\;/){
+			my @tmp2 = split (/\;/,$tmp[1]);
+			foreach my $key (@tmp2){
+				my @tmp3 = split (/\,/,$key);
+				foreach my $key2 (@tmp3){
+					if ($key2 !~ /NO/){
+						$R_hmm_ids{$key2} = 1;
+					}
 				}
 			}
 		}
 	}
-}
-close IN;
+	close IN;
 
-`mkdir -p $output/METABOLIC_Figures_Input`;
-`mkdir -p $output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input`;
-`mkdir -p $output/METABOLIC_Figures`;
+	`mkdir -p $output/METABOLIC_Figures_Input`;
+	`mkdir -p $output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input`;
+	`mkdir -p $output/METABOLIC_Figures`;
 
-# Get each R pathway input files
-my %Total_R_input = (); # pathway => gn => 1 or 0
-foreach my $gn (sort keys %Hmmscan_result){
-	my %R_input = (); # For each input file
-	foreach my $key (sort keys %R_pathways){
-		$R_input{$key} = 0; $Total_R_input{$key}{$gn} = 0;
-		my $hmms = $R_pathways{$key};
-		if ($hmms !~ /\;/){
-			foreach my $hmm_id (sort keys %R_hmm_ids){
-				if ($hmms =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-					$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
-				}
-			}
-		}elsif ($hmms =~ /\;/){
-			my ($hmms_1,$hmms_2) = $hmms =~ /^(.+?)\;(.+?)$/;
-			if ($hmms_2 !~ /NO/){
-				my $logic1 = 0; my $logic2 = 0;
+	# Get each R pathway input files
+	my %Total_R_input = (); # pathway => gn => 1 or 0
+	foreach my $gn (sort keys %Hmmscan_result){
+		my %R_input = (); # For each input file
+		foreach my $key (sort keys %R_pathways){
+			$R_input{$key} = 0; $Total_R_input{$key}{$gn} = 0;
+			my $hmms = $R_pathways{$key};
+			if ($hmms !~ /\;/){
 				foreach my $hmm_id (sort keys %R_hmm_ids){
-					if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic1 = 1;	
-					}
-					if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic2 = 1;	
+					if ($hmms =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+						$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
 					}
 				}
-				if ($logic1 and $logic2){
-					$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
-				}
-			}elsif ($hmms_2 =~ /NO/){
-				my $logic1 = 0; my $logic2 = 1;
-				foreach my $hmm_id (sort keys %R_hmm_ids){
-					if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
-						$logic1 = 1;	
-					}			
-					if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){  # if $hmms_2 contains $hmm_id , and the genome has $hmm_id hit(s), then it will be false (0)
-						$logic2 = 0;	
-					}		
-				}
-				if ($logic1 and $logic2){
-					$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
+			}elsif ($hmms =~ /\;/){
+				my ($hmms_1,$hmms_2) = $hmms =~ /^(.+?)\;(.+?)$/;
+				if ($hmms_2 !~ /NO/){
+					my $logic1 = 0; my $logic2 = 0;
+					foreach my $hmm_id (sort keys %R_hmm_ids){
+						if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic1 = 1;	
+						}
+						if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic2 = 1;	
+						}
+					}
+					if ($logic1 and $logic2){
+						$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
+					}
+				}elsif ($hmms_2 =~ /NO/){
+					my $logic1 = 0; my $logic2 = 1;
+					foreach my $hmm_id (sort keys %R_hmm_ids){
+						if ($hmms_1 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){
+							$logic1 = 1;	
+						}			
+						if ($hmms_2 =~ /$hmm_id/ and $Hmmscan_result{$gn}{$hmm_id}){  # if $hmms_2 contains $hmm_id , and the genome has $hmm_id hit(s), then it will be false (0)
+							$logic2 = 0;	
+						}		
+					}
+					if ($logic1 and $logic2){
+						$R_input{$key} = 1; $Total_R_input{$key}{$gn} = 1;
+					}
 				}
 			}
 		}
+		
+		open OUT, ">$output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input/$gn.R_input.txt";
+		foreach my $key (sort keys %R_input){
+			print OUT "$key\t$R_input{$key}\n";
+		}	
+		close OUT;
 	}
-	
-	open OUT, ">$output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input/$gn.R_input.txt";
-	foreach my $key (sort keys %R_input){
-		print OUT "$key\t$R_input{$key}\n";
-	}	
-	close OUT;
+
+	`Rscript $METABOLIC_dir/draw_biogeochemical_cycles.R $output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input $output/Output FALSE > /dev/null`;
+	`mv $output/Output/draw_biogeochem_cycles $output/METABOLIC_Figures/Nutrient_Cycling_Diagrams; rm -r $output/Output`;
+
+	$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
+	print "\[$datestring\] Drawing element cycling diagrams finished\n";
 }
-
-`Rscript $METABOLIC_dir/draw_biogeochemical_cycles.R $output/METABOLIC_Figures_Input/Nutrient_Cycling_Diagram_Input $output/Output FALSE > /dev/null`;
-`mv $output/Output/draw_biogeochem_cycles $output/METABOLIC_Figures/Nutrient_Cycling_Diagrams; rm -r $output/Output`;
-
-$datestring = strftime "%Y-%m-%d %H:%M:%S", localtime; 
-print "\[$datestring\] Drawing element cycling diagrams finished\n";
 my $endtime = $datestring;
 my $duration = time - $starttime_raw;
 $duration = parse_duration($duration);
@@ -1295,6 +1346,11 @@ close OUT;
 
 
 ## Subroutines
+sub _checkpoint_exists {
+	my ($marker_file) = @_;
+	return (-e $marker_file && -s $marker_file > 0);
+}
+
 sub parse_duration {
     use integer;
     sprintf("%02d:%02d:%02d", $_[0]/3600, $_[0]/60%60, $_[0]%60);
