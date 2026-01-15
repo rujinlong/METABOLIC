@@ -76,7 +76,7 @@ use File::Basename;
 	-tax       or -taxonomy        [string]  To calculate MW-score contribution of microbial groups at the resolution of which taxonomical level (default: "phylum"; other options: "class", "order", "family", "genus", "species", and "bin" (MAG itself))
 	-o         or -output          [string]  The METABOLIC output folder (default: current address)
 	-test                          [string]  The option to test the performance of METABOLIC-G by 5 genomes; "true" or "false" to run the test option. You can use the -cpu option in addition to the -test option to specify how many cpus to use.
-	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'false')
+	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'true')
 	
 =head1 INSTRUCTIONS
 
@@ -115,7 +115,7 @@ my $output = `pwd`; # The output folder
 my $taxonomy = "phylum"; # The taxonomy level to calculate MW-score table 
 my $version="METABOLIC-C.pl v4.0";
 my $test = "false";
-my $resume = "false"; # Resume from last checkpoint if previous run failed
+my $resume = "true"; # Resume from last checkpoint if previous run failed
 
 GetOptions(
 	'cpu|t=i' => \$cpu_numbers,

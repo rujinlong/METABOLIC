@@ -67,7 +67,7 @@ use File::Basename;
 	-p         or -prodigal-method [string]  "meta" or "single" for prodigal to annotate the orf
 	-o         or -output          [string]  The METABOLIC output folder (default: current address)
 	-test                          [string]  The option to test the performance of METABOLIC-G by 5 genomes; "true" or "false" to run the test option. You can use the -cpu option in addition to the -test option to specify how many cpus to use.
-	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'false')
+	-resume                        [string]  Resume from last checkpoint if previous run failed; "true" or "false" (default: 'true')
 	
 =head1 INSTRUCTIONS
 
@@ -103,7 +103,7 @@ my $kofam_db_size = "full"; # The full kofam size
 my $output = `pwd`; # The output folder 
 my $version="METABOLIC-G.pl v4.0";
 my $test = "false";
-my $resume = "false"; # Resume from last checkpoint if previous run failed
+my $resume = "true"; # Resume from last checkpoint if previous run failed
 
 GetOptions(
 	'cpu|t=i' => \$cpu_numbers,
