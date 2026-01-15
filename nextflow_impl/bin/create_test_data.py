@@ -71,10 +71,14 @@ def main():
     meta_tmpl_dir = os.path.join(db_root, "METABOLIC_template_and_database")
     create_dir(meta_tmpl_dir)
     
-    # prokaryote.hal
-    # K00001 \t threshold \t type
-    # Using low threshold to ensure hit
-    write_file(os.path.join(meta_tmpl_dir, "prokaryote.hal"), "K00001\t10.0\tfull\n")
+    # kofam_database - create ko_list with thresholds
+    kofam_dir = os.path.join(db_root, "kofam_database")
+    create_dir(kofam_dir)
+    
+    # ko_list format: K00001\tthreshold\tscore_type
+    # Using low threshold to ensure test hits
+    ko_list_content = "K00001\t10.0\tfull\n"
+    write_file(os.path.join(kofam_dir, "ko_list"), ko_list_content)
     
     # motif.txt (Empty for now or dummy)
     write_file(os.path.join(meta_tmpl_dir, "motif.txt"), "")

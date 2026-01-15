@@ -6,24 +6,60 @@ import argparse
 import re
 from Bio import SeqIO
 
-def load_thresholds(threshold_file, db_type='full'):
+def load_ko_list_thresholds(ko_list_file):
     """
-    Load KOfam thresholds. 
+    Load KOfam thresholds from ko_list file.
     Format: K00001 \t threshold \t score_type
     Returns dict: {'K00001.hmm': {'threshold': 100.0, 'type': 'full'}}
     """
     thresholds = {}
-    with open(threshold_file) as f:
+    with open(ko_list_file) as f:
         for line in f:
             if line.startswith("#"): continue
             parts = line.strip().split("\t")
-            if len(parts) >= 3:
-                # Legacy code handles '-' as a specific case, usually default
+            if len(parts) >= 3 and parts[0].startswith('K'):
                 hmm = f"{parts[0]}.hmm"
                 if parts[1] == "-":
-                     thresholds[hmm] = {'threshold': 50.0, 'type': 'full'}
+                    thresholds[hmm] = {'threshold': 50.0, 'type': 'full'}
                 else:
-                    thresholds[hmm] = {'threshold': float(parts[1]), 'type': parts[2]}
+                    try:
+                        thresholds[hmm] = {'threshold': float(parts[1]), 'type': parts[2]}
+                    except ValueError:
+                        thresholds[hmm] = {'threshold': 50.0, 'type': 'full'}
+    return thresholds
+
+def load_hmm_template_thresholds(hmm_template_file):
+    """
+    Load custom HMM thresholds from hmm_table_template.txt.
+    Column 6 (index 5) = HMM filename
+    Column 11 (index 10) = threshold|score_type
+    Skip KOfam entries (K\d{5}.hmm)
+    """
+    thresholds = {}
+    with open(hmm_template_file) as f:
+        for line in f:
+            if line.startswith("#"): continue
+            parts = line.strip().split("\t")
+            if len(parts) >= 11:
+                hmm_col = parts[5] if len(parts) > 5 else ""
+                threshold_col = parts[10] if len(parts) > 10 else ""
+                
+                # Skip empty or KOfam entries
+                if not hmm_col or re.match(r'^K\d{5}\.hmm$', hmm_col):
+                    continue
+                
+                # Parse threshold|score_type format
+                if '|' in threshold_col:
+                    t_val, t_type = threshold_col.split('|', 1)
+                    try:
+                        thresholds[hmm_col] = {'threshold': float(t_val), 'type': t_type}
+                    except ValueError:
+                        thresholds[hmm_col] = {'threshold': 50.0, 'type': 'full'}
+                elif threshold_col:
+                    try:
+                        thresholds[hmm_col] = {'threshold': float(threshold_col), 'type': 'full'}
+                    except ValueError:
+                        pass
     return thresholds
 
 def load_motifs(motif_file):
@@ -84,7 +120,8 @@ def main():
     parser.add_argument("--kofam_results", required=True)
     parser.add_argument("--custom_results", required=False) # Can be merged or separate
     parser.add_argument("--proteins", required=True, help="Fasta file for motif validation")
-    parser.add_argument("--kofam_thresholds", required=True)
+    parser.add_argument("--ko_list", required=True, help="KOfam ko_list file with thresholds")
+    parser.add_argument("--hmm_template", required=True, help="hmm_table_template.txt for custom thresholds")
     parser.add_argument("--motif_file", required=False)
     parser.add_argument("--motif_pair_file", required=False)
     parser.add_argument("--genome_id", required=True, help="Genome ID to attach to output")
@@ -92,8 +129,10 @@ def main():
     
     args = parser.parse_args()
 
-    # 1. Load Definitions
-    thresholds = load_thresholds(args.kofam_thresholds)
+    # 1. Load Thresholds from both sources
+    thresholds = load_ko_list_thresholds(args.ko_list)
+    custom_thresholds = load_hmm_template_thresholds(args.hmm_template)
+    thresholds.update(custom_thresholds)  # Merge, custom overrides if duplicate
     motif_regex = load_motifs(args.motif_file) if args.motif_file else {}
     motif_pairs = load_motif_pairs(args.motif_pair_file) if args.motif_pair_file else {}
     

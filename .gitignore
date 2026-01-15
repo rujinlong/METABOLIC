@@ -6,4 +6,5 @@ METABOLIC_test_files
 Motif
 dbCAN2
 kofam_database
+custom_db
 tmp_run*

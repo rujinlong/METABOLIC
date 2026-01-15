@@ -5,7 +5,8 @@ process PARSE_HMM {
 
     input:
     tuple val(genome_id), path(kofam_tbl), path(custom_tbl), path(proteins)
-    path kofam_thresholds
+    path ko_list           // KOfam thresholds (K00001\tthreshold\tscore_type)
+    path hmm_template      // Custom HMM thresholds (column 6=HMM, column 11=threshold)
     path motif_file
     path motif_pair_file
 
@@ -22,7 +23,8 @@ process PARSE_HMM {
         --kofam_results $kofam_tbl \
         $custom_arg \
         --proteins $proteins \
-        --kofam_thresholds $kofam_thresholds \
+        --ko_list $ko_list \
+        --hmm_template $hmm_template \
         $motif_arg \
         $pair_arg \
         --genome_id $genome_id \

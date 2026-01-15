@@ -85,10 +85,8 @@ workflow {
     // KOfam Search (Merged DB)
     ch_kofam_db = file(params.kofam_dir)
     
-    // Custom HMM Search
-    ch_custom_db = Channel.fromPath("${params.metabolic_hmm_dir}/*.hmm")
-                          .filter { !(it.getFileName().toString() =~ /^K\d{5}\.hmm$/) }
-                          .collectFile(name: 'custom_merged.hmm')
+    // Custom HMM Search (pre-merged)
+    ch_custom_db = file(params.metabolic_hmm)
                           
     // dbCAN Search - need HMM + auxiliary h3* files
     ch_dbcan_db = Channel.fromPath("${params.dbcan_db}*").collect()
@@ -113,7 +111,8 @@ workflow {
     // Parse HMM
     PARSE_HMM(
         ch_hmm_results,
-        file(params.kofam_threshold),
+        file(params.ko_list),
+        file(params.hmm_template_1),  // Custom HMM thresholds from column 11
         file(params.motif_file),
         file(params.motif_pair_file)
     )
