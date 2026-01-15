@@ -6,7 +6,7 @@ nextflow.enable.dsl=2
  * Import Modules
  */
 include { PRODIGAL } from './modules/annotation'
-include { HMMSEARCH as HMMSEARCH_KO; HMMSEARCH as HMMSEARCH_CUSTOM } from './modules/search'
+include { HMMSEARCH_KO; HMMSEARCH_CUSTOM } from './modules/search'
 include { DBCAN_SEARCH } from './modules/dbcan'
 include { MEROPS_SEARCH } from './modules/merops'
 include { PARSE_HMM; PARSE_DBCAN; PARSE_MEROPS } from './modules/parsing'
@@ -70,11 +70,11 @@ workflow {
     
     // Custom HMM Search
     ch_custom_db = Channel.fromPath("${params.metabolic_hmm_dir}/*.hmm")
-                          .filter { it.name !~ /^K\d{5}\.hmm$/ }
+                          .filter { !(it.getFileName().toString() =~ /^K\d{5}\.hmm$/) }
                           .collectFile(name: 'custom_merged.hmm')
                           
-    // dbCAN Search
-    ch_dbcan_db = file(params.dbcan_db)
+    // dbCAN Search - need HMM + auxiliary h3* files
+    ch_dbcan_db = Channel.fromPath("${params.dbcan_db}*").collect()
     
     // MEROPS Search
     ch_merops_db = file(params.merops_db)

@@ -294,6 +294,9 @@ def resolve_overlaps(hits):
 
     Usage: `python parse_dbcan.py input.dm output.tsv`
     """
+    pass  # End of docstring/comment function
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="domtblout file")
     parser.add_argument("output", help="output file")

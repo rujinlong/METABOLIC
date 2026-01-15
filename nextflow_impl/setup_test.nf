@@ -45,11 +45,12 @@ process BUILD_HMM_DBCAN {
     path fasta
 
     output:
-    path "dbCAN-fam-HMMs.txt"
+    path "dbCAN-fam-HMMs.txt*"
 
     script:
     """
     hmmbuild --amino dbCAN-fam-HMMs.txt $fasta
+    hmmpress dbCAN-fam-HMMs.txt
     """
 }
 
@@ -61,12 +62,11 @@ process BUILD_DIAMOND {
     path fasta
 
     output:
-    path "pepunit.db"
+    path "pepunit.db.dmnd"
 
     script:
     """
-    diamond makedb --in $fasta --db pepunit
-    mv pepunit.dmnd pepunit.db
+    diamond makedb --in $fasta --db pepunit.db
     """
 }
 

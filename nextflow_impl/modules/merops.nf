@@ -11,9 +11,11 @@ process MEROPS_SEARCH {
     tuple val(id), path("${id}.merops.m8"), emit: m8
 
     script:
+    // Diamond expects DB name without .dmnd extension
+    def db_name = merops_db.baseName.replaceAll(/\.dmnd$/, '')
     """
     diamond blastp \
-        -d $merops_db \
+        -d $db_name \
         -q $proteins \
         -o ${id}.merops.m8 \
         -k 1 \
