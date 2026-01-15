@@ -34,6 +34,14 @@ def main():
     # Protein sequence for HMM building
     protein_seq = "MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     
+    # 1b. Input Proteins (for protein-only testing)
+    protein_dir = os.path.join(root, "proteins")
+    create_dir(protein_dir)
+    
+    # Create a protein FASTA that matches what Prodigal would output
+    protein_fasta = f">test_protein_gene1\n{protein_seq}\n>test_protein_gene2\n{protein_seq}\n"
+    write_file(os.path.join(protein_dir, "test_sample.faa"), protein_fasta)
+    
     # 2. Database Build Inputs (Raw FASTAs for hmmbuild/diamond)
     raw_db_dir = os.path.join(root, "raw_db")
     create_dir(raw_db_dir)
