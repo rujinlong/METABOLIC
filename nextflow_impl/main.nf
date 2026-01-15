@@ -109,11 +109,11 @@ workflow {
     
     // 5. Generate Worksheets
     // Collect all hits
-    ch_all_hmm_hits = PARSE_HMM.out.hits.collectFile(name: 'all_hits_parsed.tsv', stripHeader: true, keepHeader: true)
+    ch_all_hmm_hits = PARSE_HMM.out.hits.collectFile(name: 'all_hits_parsed.tsv', keepHeader: true)
     
     // Collect output from dbCAN/MEROPS
     ch_all_dbcan_hits = PARSE_DBCAN.out.hits.collectFile(name: 'all_dbcan_hits.tsv')
-    ch_all_merops_hits = PARSE_MEROPS.out.hits.collectFile(name: 'all_merops_hits.tsv', stripHeader: true, keepHeader: true)
+    ch_all_merops_hits = PARSE_MEROPS.out.hits.collectFile(name: 'all_merops_hits.tsv', keepHeader: true)
     
     // Genome IDs
     ch_genome_ids = ch_genomes.map { it[0] }.collect()

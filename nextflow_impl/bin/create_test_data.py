@@ -19,13 +19,20 @@ def main():
     genome_dir = os.path.join(root, "data")
     create_dir(genome_dir)
     
-    # Simple protein sequence
-    # Length 50, mostly Alanine
-    # We will ensure this matches our dummy HMMs
-    protein_seq = "MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    # DNA sequence for Prodigal (Nucleotides)
+    # Met (ATG) - Ala (GCA) * 60 - Stop (TAA)
+    # Prodigal needs DNA input to predict proteins
+    gene1 = "ATG" + "GCA"*60 + "TAA"
+    gene2 = "ATG" + "GCC"*80 + "TGA"
     
-    genome_fasta = f">gene1\n{protein_seq}\n>gene2\n{protein_seq}\n"
+    dna_seq = gene1 + "NNNNNNNNNN" + gene2
+    
+    # Write Genome (DNA)
+    genome_fasta = f">contig1\n{dna_seq}\n"
     write_file(os.path.join(genome_dir, "test_genome.fasta"), genome_fasta)
+    
+    # Protein sequence for HMM building
+    protein_seq = "MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     
     # 2. Database Build Inputs (Raw FASTAs for hmmbuild/diamond)
     raw_db_dir = os.path.join(root, "raw_db")

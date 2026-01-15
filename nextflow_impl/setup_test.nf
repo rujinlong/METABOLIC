@@ -17,7 +17,7 @@ process BUILD_HMM_KO {
 
     script:
     """
-    hmmbuild kofam_merged.hmm $fasta
+    hmmbuild --amino kofam_merged.hmm $fasta
     """
 }
 
@@ -33,7 +33,7 @@ process BUILD_HMM_CUSTOM {
 
     script:
     """
-    hmmbuild custom.hmm $fasta
+    hmmbuild --amino custom.hmm $fasta
     """
 }
 
@@ -49,7 +49,7 @@ process BUILD_HMM_DBCAN {
 
     script:
     """
-    hmmbuild dbCAN-fam-HMMs.txt $fasta
+    hmmbuild --amino dbCAN-fam-HMMs.txt $fasta
     """
 }
 
@@ -66,6 +66,7 @@ process BUILD_DIAMOND {
     script:
     """
     diamond makedb --in $fasta --db pepunit
+    mv pepunit.dmnd pepunit.db
     """
 }
 
