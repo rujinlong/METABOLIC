@@ -21,9 +21,13 @@ def helpMessage() {
     ===========================
     Usage:
       nextflow run main.nf --input_genomes <path> [options]
+      nextflow run main.nf --input_proteins <path> [options]
 
-    Required:
+    Input (provide ONE of the following):
       --input_genomes     Path to directory containing genome FASTA files (*.fasta)
+                          Prodigal will be run to predict proteins.
+      --input_proteins    Path to directory containing protein FASTA files (*.faa)
+                          Skip Prodigal and use these directly.
 
     Options:
       --outdir            Output directory (default: results)
@@ -43,8 +47,9 @@ if (params.help) {
     exit 0
 }
 
-if (!params.input_genomes) {
-    log.error "Error: --input_genomes is required"
+// Validate inputs - need at least one of genomes or proteins
+if (!params.input_genomes && !params.input_proteins) {
+    log.error "Error: Either --input_genomes or --input_proteins is required"
     helpMessage()
     exit 1
 }
@@ -54,14 +59,24 @@ if (!params.input_genomes) {
  */
 workflow {
     
-    // 1. Input Handling
-    // Genomes: tuple(id, file)
-    ch_genomes = Channel.fromPath("${params.input_genomes}/*.fasta")
-                        .map { file -> tuple(file.simpleName, file) }
-
-    // 2. Annotation
-    PRODIGAL(ch_genomes)
-    ch_proteins = PRODIGAL.out.proteins
+    // 1. Input Handling - Support both genomes and direct protein input
+    if (params.input_proteins) {
+        // User provided protein sequences directly - skip Prodigal
+        log.info "Using provided protein sequences from: ${params.input_proteins}"
+        ch_proteins = Channel.fromPath("${params.input_proteins}/*.faa")
+                            .map { file -> tuple(file.simpleName, file) }
+        ch_sample_ids = ch_proteins.map { it[0] }
+    } else {
+        // User provided genomes - run Prodigal
+        log.info "Running Prodigal on genomes from: ${params.input_genomes}"
+        ch_genomes = Channel.fromPath("${params.input_genomes}/*.fasta")
+                            .map { file -> tuple(file.simpleName, file) }
+        
+        // 2. Annotation
+        PRODIGAL(ch_genomes)
+        ch_proteins = PRODIGAL.out.proteins
+        ch_sample_ids = ch_genomes.map { it[0] }
+    }
 
     // 3. Search (HMM / dbCAN / MEROPS)
     
@@ -115,8 +130,8 @@ workflow {
     ch_all_dbcan_hits = PARSE_DBCAN.out.hits.collectFile(name: 'all_dbcan_hits.tsv')
     ch_all_merops_hits = PARSE_MEROPS.out.hits.collectFile(name: 'all_merops_hits.tsv', keepHeader: true)
     
-    // Genome IDs
-    ch_genome_ids = ch_genomes.map { it[0] }.collect()
+    // Sample IDs (from proteins or genomes)
+    ch_sample_ids_collected = ch_sample_ids.collect()
     
     GENERATE_TABLES(
         ch_all_hmm_hits,
@@ -126,6 +141,6 @@ workflow {
         file(params.kegg_steps_db),
         ch_all_dbcan_hits,
         ch_all_merops_hits,
-        ch_genome_ids
+        ch_sample_ids_collected
     )
 }
