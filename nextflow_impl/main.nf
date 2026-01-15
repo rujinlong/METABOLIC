@@ -5,7 +5,7 @@ nextflow.enable.dsl=2
 /*
  * Import Modules
  */
-include { PRODIGAL } from './modules/annotation'
+include { PYRODIGAL } from './modules/annotation'
 include { HMMSEARCH_KO; HMMSEARCH_CUSTOM } from './modules/search'
 include { DBCAN_SEARCH } from './modules/dbcan'
 include { MEROPS_SEARCH } from './modules/merops'
@@ -25,14 +25,16 @@ def helpMessage() {
 
     Input (provide ONE of the following):
       --input_genomes     Path to directory containing genome FASTA files (*.fasta)
-                          Prodigal will be run to predict proteins.
+                          Pyrodigal will be run to predict proteins.
       --input_proteins    Path to directory containing protein FASTA files (*.faa)
-                          Skip Prodigal and use these directly.
+                          Skip Pyrodigal and use these directly.
 
     Options:
       --outdir            Output directory (default: results)
-      --kofam_dir         Path to merged KOfam HMM database
-      --metabolic_hmm_dir Path to METABOLIC custom HMM directory
+      --db_dir            Root directory for all METABOLIC databases
+                          (default: \$HOME/database/METABOLIC)
+      --pyrodigal_mode    Pyrodigal prediction mode: 'single' or 'meta' (default: single)
+                          Use 'single' for isolate genomes, 'meta' for metagenomes.
       --help              Show this help message
 
     Profiles:
@@ -67,14 +69,14 @@ workflow {
                             .map { file -> tuple(file.simpleName, file) }
         ch_sample_ids = ch_proteins.map { it[0] }
     } else {
-        // User provided genomes - run Prodigal
-        log.info "Running Prodigal on genomes from: ${params.input_genomes}"
+        // User provided genomes - run Pyrodigal (multi-threaded)
+        log.info "Running Pyrodigal on genomes from: ${params.input_genomes}"
         ch_genomes = Channel.fromPath("${params.input_genomes}/*.fasta")
                             .map { file -> tuple(file.simpleName, file) }
         
         // 2. Annotation
-        PRODIGAL(ch_genomes)
-        ch_proteins = PRODIGAL.out.proteins
+        PYRODIGAL(ch_genomes)
+        ch_proteins = PYRODIGAL.out.proteins
         ch_sample_ids = ch_genomes.map { it[0] }
     }
 

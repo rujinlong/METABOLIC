@@ -1,6 +1,6 @@
-process PRODIGAL {
+process PYRODIGAL {
     tag "$genome_id"
-    label 'process_medium'
+    label 'process_high'
     publishDir "${params.outdir}/proteins", mode: 'copy'
 
     input:
@@ -9,12 +9,18 @@ process PRODIGAL {
     output:
     tuple val(genome_id), path("${genome_id}.faa"), emit: proteins
     tuple val(genome_id), path("${genome_id}.gff"), emit: gff
+    tuple val(genome_id), path("${genome_id}.fna"), emit: nucleotides
 
     script:
     """
-    prodigal -i $fasta \
-             -a ${genome_id}.faa \
-             -o ${genome_id}.gff \
-             -p meta -f gff -q
+    pyrodigal -i $fasta \
+              -a ${genome_id}.faa \
+              -d ${genome_id}.fna \
+              -o ${genome_id}.gff \
+              -p ${params.pyrodigal_mode} \
+              -f gff \
+              -m \
+              --pool process \
+              -j ${task.cpus}
     """
 }
