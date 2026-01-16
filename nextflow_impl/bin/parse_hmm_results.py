@@ -1,21 +1,68 @@
 #!/usr/bin/env python3
+"""
+Parse HMMsearch results for METABOLIC.
+
+This script filters HMM hits based on:
+1. Per-HMM thresholds (from ko_list and hmm_table_template)
+2. Motif validation (active site residues)
+3. Motif pair comparisons (competing HMMs)
+
+It uses a contig_map to resolve protein IDs to genome/MAG IDs.
+"""
 
 import sys
-import pandas as pd
-import argparse
 import re
-from Bio import SeqIO
+from pathlib import Path
+from typing import Optional
 
-def load_ko_list_thresholds(ko_list_file):
-    """
-    Load KOfam thresholds from ko_list file.
-    Format: K00001 \t threshold \t score_type
-    Returns dict: {'K00001.hmm': {'threshold': 100.0, 'type': 'full'}}
-    """
+import polars as pl
+import typer
+from Bio import SeqIO
+from rich.console import Console
+from rich.progress import Progress
+
+console = Console(stderr=True)
+app = typer.Typer(add_completion=False)
+
+
+def load_contig_map(contig_map_file: Path) -> dict[str, str]:
+    """Load contig-to-genome mapping."""
+    contig_to_genome = {}
+    with open(contig_map_file) as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) >= 2:
+                contig_to_genome[parts[0]] = parts[1]
+    return contig_to_genome
+
+
+def extract_contig_from_protein(protein_id: str) -> str:
+    """Extract contigID from proteinID (format: contigID_proteinNumber)."""
+    parts = protein_id.rsplit('_', 1)
+    return parts[0] if len(parts) > 1 else protein_id
+
+
+def load_cluster_map(cluster_tsv_file: Path) -> dict[str, list[str]]:
+    """Load MMseqs2 cluster membership: rep_id -> [member_ids]."""
+    cluster_map: dict[str, list[str]] = {}
+    with open(cluster_tsv_file) as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) >= 2:
+                rep_id, member_id = parts[0], parts[1]
+                if rep_id not in cluster_map:
+                    cluster_map[rep_id] = []
+                cluster_map[rep_id].append(member_id)
+    return cluster_map
+
+
+def load_ko_list_thresholds(ko_list_file: Path) -> dict[str, dict]:
+    """Load KOfam thresholds from ko_list file."""
     thresholds = {}
     with open(ko_list_file) as f:
         for line in f:
-            if line.startswith("#"): continue
+            if line.startswith("#"):
+                continue
             parts = line.strip().split("\t")
             if len(parts) >= 3 and parts[0].startswith('K'):
                 hmm = f"{parts[0]}.hmm"
@@ -28,27 +75,22 @@ def load_ko_list_thresholds(ko_list_file):
                         thresholds[hmm] = {'threshold': 50.0, 'type': 'full'}
     return thresholds
 
-def load_hmm_template_thresholds(hmm_template_file):
-    """
-    Load custom HMM thresholds from hmm_table_template.txt.
-    Column 6 (index 5) = HMM filename
-    Column 11 (index 10) = threshold|score_type
-    Skip KOfam entries (K\d{5}.hmm)
-    """
+
+def load_hmm_template_thresholds(hmm_template_file: Path) -> dict[str, dict]:
+    """Load custom HMM thresholds from hmm_table_template.txt."""
     thresholds = {}
     with open(hmm_template_file) as f:
         for line in f:
-            if line.startswith("#"): continue
+            if line.startswith("#"):
+                continue
             parts = line.strip().split("\t")
             if len(parts) >= 11:
                 hmm_col = parts[5] if len(parts) > 5 else ""
                 threshold_col = parts[10] if len(parts) > 10 else ""
                 
-                # Skip empty or KOfam entries
                 if not hmm_col or re.match(r'^K\d{5}\.hmm$', hmm_col):
                     continue
                 
-                # Parse threshold|score_type format
                 if '|' in threshold_col:
                     t_val, t_type = threshold_col.split('|', 1)
                     try:
@@ -62,31 +104,29 @@ def load_hmm_template_thresholds(hmm_template_file):
                         pass
     return thresholds
 
-def load_motifs(motif_file):
-    """
-    Load motif regex definitions.
-    Format: hmm_name:motif_string (with X)
-    Returns dict: {'hmm': compiled_regex}
-    """
+
+def load_motifs(motif_file: Optional[Path]) -> dict[str, re.Pattern]:
+    """Load motif regex definitions."""
     motifs = {}
-    if not motif_file: return motifs
+    if not motif_file:
+        return motifs
     
     with open(motif_file) as f:
         for line in f:
             parts = line.strip().split(":")
             if len(parts) == 2:
                 hmm, pattern = parts
-                # Convert X to amino acid character set
                 pattern = pattern.replace("X", "[ARNDCQEGHILKMFPSTWYV]")
                 motifs[hmm] = re.compile(pattern)
     return motifs
 
-def load_motif_pairs(pair_file):
-    """
-    Load motif pairs. Format: hmm:partner_hmm
-    """
+
+def load_motif_pairs(pair_file: Optional[Path]) -> dict[str, str]:
+    """Load motif pairs."""
     pairs = {}
-    if not pair_file: return pairs
+    if not pair_file:
+        return pairs
+    
     with open(pair_file) as f:
         for line in f:
             parts = line.strip().split(":")
@@ -94,76 +134,87 @@ def load_motif_pairs(pair_file):
                 pairs[parts[0]] = parts[1]
     return pairs
 
-def parse_tblout(tblout_file):
-    """
-    Parse generic tblout file into DataFrame.
-    Columns: seq_id, accession, hmm_name, accession, ..., full_score, ..., domain_score
-    """
-    # tblout is whitespace delimited, fix widths? No, usually generic split is safer if no internal spaces
-    # But usually extract: col 0 (target), col 2 (query/hmm), col 5 (full score), col 8 (best dom score)
+
+def parse_tblout(tblout_file: Path) -> pl.DataFrame:
+    """Parse hmmsearch tblout format using Polars."""
     data = []
     with open(tblout_file) as f:
         for line in f:
-            if line.startswith("#"): continue
+            if line.startswith("#"):
+                continue
             parts = line.strip().split()
-            if len(parts) < 10: continue
+            if len(parts) < 10:
+                continue
             data.append({
                 'seq_id': parts[0],
                 'hmm_name': parts[2],
                 'full_score': float(parts[5]),
                 'domain_score': float(parts[8])
             })
-    return pd.DataFrame(data)
+    return pl.DataFrame(data) if data else pl.DataFrame(schema={
+        'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
+        'full_score': pl.Float64, 'domain_score': pl.Float64
+    })
 
-def main():
-    parser = argparse.ArgumentParser(description="Parse HMMsearch results for METABOLIC")
-    parser.add_argument("--kofam_results", required=True)
-    parser.add_argument("--custom_results", required=False) # Can be merged or separate
-    parser.add_argument("--proteins", required=True, help="Fasta file for motif validation")
-    parser.add_argument("--ko_list", required=True, help="KOfam ko_list file with thresholds")
-    parser.add_argument("--hmm_template", required=True, help="hmm_table_template.txt for custom thresholds")
-    parser.add_argument("--motif_file", required=False)
-    parser.add_argument("--motif_pair_file", required=False)
-    parser.add_argument("--genome_id", required=True, help="Genome ID to attach to output")
-    parser.add_argument("--output", required=True)
-    
-    args = parser.parse_args()
 
-    # 1. Load Thresholds from both sources
-    thresholds = load_ko_list_thresholds(args.ko_list)
-    custom_thresholds = load_hmm_template_thresholds(args.hmm_template)
-    thresholds.update(custom_thresholds)  # Merge, custom overrides if duplicate
-    motif_regex = load_motifs(args.motif_file) if args.motif_file else {}
-    motif_pairs = load_motif_pairs(args.motif_pair_file) if args.motif_pair_file else {}
+@app.command()
+def main(
+    kofam_results: Path = typer.Option(..., "--kofam_results", help="KOfam hmmsearch tblout"),
+    proteins: Path = typer.Option(..., "--proteins", help="Fasta file for motif validation"),
+    ko_list: Path = typer.Option(..., "--ko_list", help="KOfam ko_list file with thresholds"),
+    hmm_template: Path = typer.Option(..., "--hmm_template", help="hmm_table_template.txt"),
+    contig_map: Path = typer.Option(..., "--contig_map", help="contigID to genomeID mapping TSV"),
+    output: Path = typer.Option(..., "--output", help="Output TSV file"),
+    custom_results: Optional[Path] = typer.Option(None, "--custom_results", help="Custom hmmsearch tblout"),
+    motif_file: Optional[Path] = typer.Option(None, "--motif_file", help="Motif definitions"),
+    motif_pair_file: Optional[Path] = typer.Option(None, "--motif_pair_file", help="Motif pairs"),
+    cluster_tsv: Optional[Path] = typer.Option(None, "--cluster_tsv", help="MMseqs2 cluster TSV"),
+):
+    """Parse HMMsearch results for METABOLIC pipeline."""
     
-    # 2. Parse Results (KOfam)
-    df_ko = parse_tblout(args.kofam_results)
+    console.log("[bold blue]Loading reference data...")
     
-    # Merge custom results if exists
-    if args.custom_results:
-        df_cust = parse_tblout(args.custom_results)
-        df = pd.concat([df_ko, df_cust])
-    else:
-        df = df_ko
-
-    if df.empty:
-        open(args.output, 'w').close()
+    # 1. Load mappings
+    contig_to_genome = load_contig_map(contig_map)
+    thresholds = load_ko_list_thresholds(ko_list)
+    custom_thresholds = load_hmm_template_thresholds(hmm_template)
+    thresholds.update(custom_thresholds)
+    
+    motif_regex = load_motifs(motif_file)
+    motif_pairs = load_motif_pairs(motif_pair_file)
+    
+    console.log(f"[green]Loaded {len(thresholds)} HMM thresholds")
+    
+    # 2. Parse Results
+    console.log("[bold blue]Parsing HMM results...")
+    df = parse_tblout(kofam_results)
+    
+    if custom_results:
+        df_cust = parse_tblout(custom_results)
+        df = pl.concat([df, df_cust])
+    
+    if df.height == 0:
+        console.log("[yellow]No hits found, writing empty output")
+        pl.DataFrame(schema={
+            'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
+            'full_score': pl.Float64, 'domain_score': pl.Float64, 'genome_id': pl.Utf8
+        }).write_csv(output, separator='\t')
         return
 
-    # 3. Filter by Thresholds
-    valid_hits = []
+    console.log(f"[green]Parsed {df.height} raw hits")
     
-    # Pre-load sequences ONLY if motifs are required (Optimisation)
-    # Check if any candidate hits map to HMMs that have motifs
-    # Actually, legacy loads all. We can load lazy or load all.
-    seq_dict = SeqIO.to_dict(SeqIO.parse(args.proteins, "fasta"))
-
-    for _, row in df.iterrows():
+    # 3. Pre-load sequences for motif validation
+    seq_dict = SeqIO.to_dict(SeqIO.parse(proteins, "fasta"))
+    
+    # 4. Filter by Thresholds and Motifs (row-wise logic required)
+    df_dict = df.to_dicts()
+    score_map = {(r['seq_id'], r['hmm_name']): r['full_score'] for r in df_dict}
+    
+    valid_hits = []
+    for row in df_dict:
         hmm = f"{row['hmm_name']}.hmm"
         
-        # Check thresholds
         if hmm not in thresholds:
-            # Maybe skip or keep? Legacy says "next unless exists"
             continue
             
         th = thresholds[hmm]
@@ -179,89 +230,58 @@ def main():
         if not pass_threshold:
             continue
             
-        # 4. Filter by Motif / Pair
-        row_id = (row['seq_id'], row['hmm_name'])
-        
+        # Motif validation
         if row['hmm_name'] in motif_regex:
-            # Check sequence
             seq_record = seq_dict.get(row['seq_id'])
             if seq_record:
                 seq_str = str(seq_record.seq)
                 if motif_regex[row['hmm_name']].search(seq_str):
-                     valid_hits.append(row)
-        
+                    valid_hits.append(row)
         elif row['hmm_name'] in motif_pairs:
-            # Pair logic: Postpone to batch processing
-            # We need to collect all hits for this seq_id to compare scores later
-            pass 
+            partner_hmm = motif_pairs[row['hmm_name']]
+            my_score = row['full_score']
+            partner_score = score_map.get((row['seq_id'], partner_hmm), 0.0)
+            if my_score >= partner_score:
+                valid_hits.append(row)
         else:
-            # Plain hit for HMMs that are NOT in motif_regex AND NOT in motif_pairs
-            # Wait, what if it IS a partner in a pair?
-            # The motif_pairs dict is {hmm: partner}.
-            # We need to know if 'hmm_name' acts as a partner too? 
-            # In legacy: "if exists Motif_pair{$hmm}".
-            # So if it's the KEY in the pair map, we check.
-            # If it's the VALUE, what happens? 
-            # Legacy only checks `if (exists $Motif_pair{$hmm_basename})`.
-            # If it's the 'anti' hmm, it proceeds to 'else' block -> _process_hit.
-            # BUT, the `push @motif_pair_candidates` logic eventually runs hmmsearch for BOTH.
-            # And then: `if ($motif_score >= $anti_score ...)`
-            # So effectively, for the PRIMARY motif (key), we check against secondary.
-            # For the SECONDARY motif (value), does it have its own entry?
-            # Usually pairs are directional A->B.
             valid_hits.append(row)
 
-    # 5. Handle Motif Pairs
-    # We need to handle the case where we saw the Key but need to check the Value's score.
-    # The dataframe `df` contains ALL hits.
-    # We need a lookup for scores: (seq_id, hmm_name) -> full_score
+    console.log(f"[green]Filtered to {len(valid_hits)} valid hits")
     
-    # Create score lookup
-    score_map = {} # (seq_id, hmm_name) -> score
-    for _, row in df.iterrows():
-         score_map[(row['seq_id'], row['hmm_name'])] = row['full_score']
+    # 5. Expand hits if clustering was used
+    if cluster_tsv:
+        cluster_map = load_cluster_map(cluster_tsv)
+        expanded_rows = []
+        for row in valid_hits:
+            rep_id = row['seq_id']
+            members = cluster_map.get(rep_id, [rep_id])
+            for member_id in members:
+                new_row = row.copy()
+                new_row['seq_id'] = member_id
+                expanded_rows.append(new_row)
+        valid_hits = expanded_rows
+        console.log(f"[green]Expanded to {len(valid_hits)} hits after cluster expansion")
     
-    # Iterate thresholds again for pairs?
-    # Or just iterate the original df and filter?
-    # We only care about rows where `hmm_name` is in `motif_pairs`.
-    
-    for _, row in df.iterrows():
-        hmm = row['hmm_name']
-        if hmm in motif_pairs:
-            # This is a Motif Pair Key
-            partner_hmm = motif_pairs[hmm]
-            
-            my_score = row['full_score']
-            
-            # Check partner score
-            partner_score = score_map.get((row['seq_id'], partner_hmm), 0.0)
-            
-            # Check threshold (already done implicitly? No, we skipped appending validity above)
-            # Threshold check for 'hmm'
-            full_hmm = f"{hmm}.hmm"
-            if full_hmm in thresholds:
-                 th = thresholds[full_hmm]
-                 pass_th = False
-                 if th['type'] == 'domain':
-                      if row['domain_score'] >= th['threshold']: pass_th = True
-                 else:
-                      if row['full_score'] >= th['threshold']: pass_th = True
-                 
-                 if pass_th:
-                     # Compare with partner
-                     if my_score >= partner_score:
-                         valid_hits.append(row)
-
-    final_hits = pd.DataFrame(valid_hits)
-    
-    # Write Output
-    if not final_hits.empty:
-        # Deduplicate? If needed.
-        # Legacy might output multiple hits.
-        final_hits['genome_id'] = args.genome_id
-        final_hits.to_csv(args.output, sep="\t", index=False)
+    # 6. Add genome_id and write output
+    if valid_hits:
+        final_df = pl.DataFrame(valid_hits)
+        final_df = final_df.with_columns(
+            pl.col('seq_id').map_elements(
+                extract_contig_from_protein, return_dtype=pl.Utf8
+            ).alias('contig_id')
+        ).with_columns(
+            pl.col('contig_id').replace(contig_to_genome, default='UNKNOWN').alias('genome_id')
+        ).drop('contig_id')
+        
+        final_df.write_csv(output, separator='\t')
+        console.log(f"[bold green]✓ Wrote {final_df.height} hits to {output}")
     else:
-        open(args.output, 'w').close()
+        pl.DataFrame(schema={
+            'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
+            'full_score': pl.Float64, 'domain_score': pl.Float64, 'genome_id': pl.Utf8
+        }).write_csv(output, separator='\t')
+        console.log("[yellow]No valid hits, wrote empty output")
+
 
 if __name__ == "__main__":
-    main()
+    app()

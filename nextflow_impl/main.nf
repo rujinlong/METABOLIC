@@ -5,7 +5,7 @@ nextflow.enable.dsl=2
 /*
  * Import Modules
  */
-include { PYRODIGAL } from './modules/annotation'
+include { MMSEQS_CLUSTER } from './modules/cluster'
 include { HMMSEARCH_KO; HMMSEARCH_CUSTOM } from './modules/search'
 include { DBCAN_SEARCH } from './modules/dbcan'
 include { MEROPS_SEARCH } from './modules/merops'
@@ -19,28 +19,36 @@ def helpMessage() {
     log.info """
     METABOLIC-Nextflow Pipeline
     ===========================
+    
+    A streamlined, HPC-optimized pipeline for metabolic potential profiling.
+
     Usage:
-      nextflow run main.nf --input_genomes <path> [options]
-      nextflow run main.nf --input_proteins <path> [options]
+      nextflow run main.nf --proteins <fasta> --contig_map <tsv> [options]
 
-    Input (provide ONE of the following):
-      --input_genomes     Path to directory containing genome FASTA files (*.fasta)
-                          Pyrodigal will be run to predict proteins.
-      --input_proteins    Path to directory containing protein FASTA files (*.faa)
-                          Skip Pyrodigal and use these directly.
+    Required Inputs:
+      --proteins        Path to a SINGLE concatenated protein FASTA file
+                        Header format MUST be: >contigID_proteinID [description]
+                        Example: >contig001_1 hypothetical protein
+      
+      --contig_map      Path to TSV file mapping contig IDs to genome/MAG IDs
+                        Format: contigID<TAB>genomeID (no header)
 
-    Options:
-      --outdir            Output directory (default: results)
-      --db_dir            Root directory for all METABOLIC databases
-                          (default: \$HOME/database/METABOLIC)
-      --pyrodigal_mode    Pyrodigal prediction mode: 'single' or 'meta' (default: single)
-                          Use 'single' for isolate genomes, 'meta' for metagenomes.
-      --help              Show this help message
+    Clustering Options:
+      --skip_cluster    Skip MMseqs2 clustering (default: false)
+                        Use if input is already dereplicated.
+      --cluster_sid     Minimum sequence identity for clustering (default: 0.9)
+      --cluster_cov     Minimum coverage for clustering (default: 0.8)
+
+    Other Options:
+      --outdir          Output directory (default: results)
+      --db_dir          Root directory for all METABOLIC databases
+      --help            Show this help message
 
     Profiles:
-      -profile standard   Run locally
-      -profile docker     Run with Docker
-      -profile singularity Run with Singularity
+      -profile standard     Run locally
+      -profile docker       Run with Docker
+      -profile singularity  Run with Singularity
+      -profile hpc          Run on HPC with SLURM
     """.stripIndent()
 }
 
@@ -49,9 +57,15 @@ if (params.help) {
     exit 0
 }
 
-// Validate inputs - need at least one of genomes or proteins
-if (!params.input_genomes && !params.input_proteins) {
-    log.error "Error: Either --input_genomes or --input_proteins is required"
+// Validate inputs
+if (!params.proteins) {
+    log.error "Error: --proteins is required"
+    helpMessage()
+    exit 1
+}
+
+if (!params.contig_map) {
+    log.error "Error: --contig_map is required"
     helpMessage()
     exit 1
 }
@@ -61,87 +75,73 @@ if (!params.input_genomes && !params.input_proteins) {
  */
 workflow {
     
-    // 1. Input Handling - Support both genomes and direct protein input
-    if (params.input_proteins) {
-        // User provided protein sequences directly - skip Prodigal
-        log.info "Using provided protein sequences from: ${params.input_proteins}"
-        ch_proteins = Channel.fromPath("${params.input_proteins}/*.faa")
-                            .map { file -> tuple(file.simpleName, file) }
-        ch_sample_ids = ch_proteins.map { it[0] }
+    // 1. Input: Single concatenated protein file
+    log.info "Using protein sequences from: ${params.proteins}"
+    log.info "Using contig-to-genome mapping: ${params.contig_map}"
+    
+    ch_input_proteins = file(params.proteins)
+    ch_contig_map = file(params.contig_map)
+
+    // 2. Optional Clustering Step
+    if (params.skip_cluster) {
+        log.info "Skipping MMseqs2 clustering (--skip_cluster=true)"
+        ch_proteins = Channel.of(tuple('all_proteins', ch_input_proteins))
+        ch_cluster_tsv = Channel.of(file('NO_CLUSTER'))
     } else {
-        // User provided genomes - run Pyrodigal (multi-threaded)
-        log.info "Running Pyrodigal on genomes from: ${params.input_genomes}"
-        ch_genomes = Channel.fromPath("${params.input_genomes}/*.fasta")
-                            .map { file -> tuple(file.simpleName, file) }
-        
-        // 2. Annotation
-        PYRODIGAL(ch_genomes)
-        ch_proteins = PYRODIGAL.out.proteins
-        ch_sample_ids = ch_genomes.map { it[0] }
+        log.info "Running MMseqs2 clustering (identity=${params.cluster_sid}, coverage=${params.cluster_cov})"
+        MMSEQS_CLUSTER(ch_input_proteins)
+        ch_proteins = MMSEQS_CLUSTER.out.rep_seq.map { tuple('rep_proteins', it) }
+        ch_cluster_tsv = MMSEQS_CLUSTER.out.cluster_tsv
     }
 
-    // 3. Search (HMM / dbCAN / MEROPS)
-    
-    // KOfam Search (Merged DB)
+    // 3. Database channels
     ch_kofam_db = file(params.kofam_dir)
-    
-    // Custom HMM Search (pre-merged)
     ch_custom_db = file(params.metabolic_hmm)
-                          
-    // dbCAN Search - need HMM + auxiliary h3* files
     ch_dbcan_db = Channel.fromPath("${params.dbcan_db}*").collect()
-    
-    // MEROPS Search
     ch_merops_db = file(params.merops_db)
     ch_merops_lib = file(params.merops_lib)
     
-    // Run Searches
+    // 4. Run Searches (all in parallel)
     HMMSEARCH_KO(ch_proteins, ch_kofam_db)
     HMMSEARCH_CUSTOM(ch_proteins, ch_custom_db)
     DBCAN_SEARCH(ch_proteins, ch_dbcan_db)
     MEROPS_SEARCH(ch_proteins, ch_merops_db)
     
-    // Join HMM Results for Parsing
+    // 5. Join HMM Results for Parsing
     ch_hmm_results = HMMSEARCH_KO.out.tblout
         .join(HMMSEARCH_CUSTOM.out.tblout, by: 0)
-        .join(ch_proteins, by: 0)
+        .combine(ch_proteins.map { it[1] })  // Add protein file for motif validation
         
-    // 4. Parse Results
-    
-    // Parse HMM
+    // 6. Parse Results with contig_map and cluster_tsv for expansion
     PARSE_HMM(
         ch_hmm_results,
         file(params.ko_list),
-        file(params.hmm_template_1),  // Custom HMM thresholds from column 11
+        file(params.hmm_template_1),
         file(params.motif_file),
-        file(params.motif_pair_file)
+        file(params.motif_pair_file),
+        ch_contig_map,
+        ch_cluster_tsv
     )
     
-    // Parse dbCAN
-    PARSE_DBCAN(DBCAN_SEARCH.out.domtblout)
+    PARSE_DBCAN(DBCAN_SEARCH.out.domtblout, ch_contig_map, ch_cluster_tsv)
     
-    // Parse MEROPS
-    PARSE_MEROPS(MEROPS_SEARCH.out.m8, ch_merops_lib)
+    PARSE_MEROPS(MEROPS_SEARCH.out.m8, ch_merops_lib, ch_contig_map, ch_cluster_tsv)
     
-    // 5. Generate Worksheets
-    // Collect all hits
-    ch_all_hmm_hits = PARSE_HMM.out.hits.collectFile(name: 'all_hits_parsed.tsv', keepHeader: true)
-    
-    // Collect output from dbCAN/MEROPS
-    ch_all_dbcan_hits = PARSE_DBCAN.out.hits.collectFile(name: 'all_dbcan_hits.tsv')
-    ch_all_merops_hits = PARSE_MEROPS.out.hits.collectFile(name: 'all_merops_hits.tsv', keepHeader: true)
-    
-    // Sample IDs (from proteins or genomes)
-    ch_sample_ids_collected = ch_sample_ids.collect()
+    // 7. Generate Worksheets
+    ch_genome_ids = Channel.fromPath(params.contig_map)
+        .splitCsv(sep: '\t')
+        .map { it[1] }
+        .unique()
+        .collect()
     
     GENERATE_TABLES(
-        ch_all_hmm_hits,
+        PARSE_HMM.out.hits,
         file(params.hmm_template_1),
         file(params.hmm_template_2),
         file(params.kegg_module_db),
         file(params.kegg_steps_db),
-        ch_all_dbcan_hits,
-        ch_all_merops_hits,
-        ch_sample_ids_collected
+        PARSE_DBCAN.out.hits,
+        PARSE_MEROPS.out.hits,
+        ch_genome_ids
     )
 }
