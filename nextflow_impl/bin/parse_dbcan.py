@@ -52,7 +52,13 @@ def load_cluster_map(cluster_tsv_file: Path) -> dict[str, list[str]]:
 
 
 def parse_domtblout(input_file: Path) -> list[dict]:
-    """Parse hmmscan domtblout format."""
+    """
+    Parse hmmscan domtblout format.
+    
+    In hmmscan output:
+    - Column 0 (target): HMM name (e.g., AA3.hmm)
+    - Column 3 (query): Protein sequence ID (e.g., BBKHAN_03036)
+    """
     hits = []
     with open(input_file) as f:
         for line in f:
@@ -63,10 +69,10 @@ def parse_domtblout(input_file: Path) -> list[dict]:
                 continue
             
             hits.append({
-                'target': parts[0],
-                'tlen': int(parts[2]),
-                'query': parts[3],
-                'qlen': int(parts[5]),
+                'hmm_name': parts[0],      # HMM name (target in hmmscan)
+                'hmm_len': int(parts[2]),  # HMM length
+                'seq_id': parts[3],        # Protein ID (query in hmmscan)
+                'seq_len': int(parts[5]),  # Protein length
                 'evalue': float(parts[12]),  # i-Evalue
                 'hmm_from': int(parts[15]),
                 'hmm_to': int(parts[16]),
@@ -137,11 +143,12 @@ def main(
     raw_hits = parse_domtblout(input_file)
     console.log(f"[green]Parsed {len(raw_hits)} raw domain hits")
     
+    # Group by HMM name for overlap resolution
     hits_by_hmm: dict[str, list[dict]] = {}
     for hit in raw_hits:
-        if hit['query'] not in hits_by_hmm:
-            hits_by_hmm[hit['query']] = []
-        hits_by_hmm[hit['query']].append(hit)
+        if hit['hmm_name'] not in hits_by_hmm:
+            hits_by_hmm[hit['hmm_name']] = []
+        hits_by_hmm[hit['hmm_name']].append(hit)
     
     # Resolve overlaps
     final_hits = resolve_overlaps(hits_by_hmm)
@@ -150,20 +157,21 @@ def main(
     # Filter by E-value and coverage, expand clusters, collect rows
     rows = []
     for h in final_hits:
-        cov = (h['hmm_to'] - h['hmm_from']) / h['tlen'] if h['tlen'] > 0 else 0
+        cov = (h['hmm_to'] - h['hmm_from']) / h['hmm_len'] if h['hmm_len'] > 0 else 0
         
         if h['evalue'] <= evalue_cutoff and cov >= coverage_cutoff:
-            rep_id = h['target']
-            targets = cluster_map.get(rep_id, [rep_id]) if cluster_map else [rep_id]
+            # Use seq_id (protein ID) for genome resolution, NOT hmm_name!
+            rep_id = h['seq_id']
+            seq_ids = cluster_map.get(rep_id, [rep_id]) if cluster_map else [rep_id]
             
-            for target_id in targets:
-                contig_id = extract_contig_from_protein(target_id)
+            for seq_id in seq_ids:
+                contig_id = extract_contig_from_protein(seq_id)
                 genome_id = contig_to_genome.get(contig_id, 'UNKNOWN')
                 rows.append({
-                    'target': target_id,
-                    'tlen': h['tlen'],
-                    'query': h['query'],
-                    'qlen': h['qlen'],
+                    'seq_id': seq_id,
+                    'hmm_name': h['hmm_name'].replace('.hmm', ''),  # Strip .hmm suffix
+                    'hmm_len': h['hmm_len'],
+                    'seq_len': h['seq_len'],
                     'evalue': h['evalue'],
                     'hmm_from': h['hmm_from'],
                     'hmm_to': h['hmm_to'],
@@ -180,7 +188,7 @@ def main(
         console.log(f"[bold green]✓ Wrote {df.height} hits to {output}")
     else:
         pl.DataFrame(schema={
-            'target': pl.Utf8, 'tlen': pl.Int64, 'query': pl.Utf8, 'qlen': pl.Int64,
+            'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 'hmm_len': pl.Int64, 'seq_len': pl.Int64,
             'evalue': pl.Float64, 'hmm_from': pl.Int64, 'hmm_to': pl.Int64,
             'ali_from': pl.Int64, 'ali_to': pl.Int64, 'coverage': pl.Float64, 'genome_id': pl.Utf8
         }).write_csv(output, separator='\t')

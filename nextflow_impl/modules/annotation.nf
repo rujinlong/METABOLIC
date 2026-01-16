@@ -1,6 +1,6 @@
 process PYRODIGAL {
     tag "$genome_id"
-    label 'process_high'
+    label 'process_medium'
     publishDir "${params.outdir}/proteins", mode: 'copy'
 
     input:

@@ -173,8 +173,8 @@ def main(
             df_dbcan = pl.read_csv(dbcan_hits, separator='\t')
             for row in df_dbcan.iter_rows(named=True):
                 gid = row.get('genome_id', 'UNKNOWN')
-                family = row.get('query', '').replace(".hmm", "")
-                if gid in dbcan_counts:
+                family = row.get('hmm_name', '')  # CAZyme family (e.g., GH1, AA3)
+                if gid in dbcan_counts and family:
                     dbcan_counts[gid][family] = dbcan_counts[gid].get(family, 0) + 1
         except Exception as e:
             console.log(f"[yellow]Warning: Failed to parse dbCAN hits: {e}")

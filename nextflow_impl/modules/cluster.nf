@@ -1,6 +1,6 @@
 process MMSEQS_CLUSTER {
     tag "clustering"
-    label 'process_high'
+    label 'process_medium'
     publishDir "${params.outdir}/cluster", mode: 'copy'
 
     input:
