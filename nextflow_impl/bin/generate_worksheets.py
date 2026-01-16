@@ -199,21 +199,21 @@ def main(
     rows1 = []
     for entry_id, t in templates1.items():
         row = {
-            'Category': t['category'],
-            'Function': t['function'],
-            'Gene abbreviation': t['gene_abbr'],
-            'Gene name': t['gene_name'],
-            'Hmm file': t['hmm_file'],
-            'Corresponding KO': t['ko'],
-            'Reaction': t['reaction'],
-            'Product': t['product'],
-            'Hmm detecting threshold': t['threshold']
+            'category': t['category'],
+            'function': t['function'],
+            'gene_abbr': t['gene_abbr'],
+            'gene_name': t['gene_name'],
+            'hmm_file': t['hmm_file'],
+            'corresponding_ko': t['ko'],
+            'reaction': t['reaction'],
+            'product': t['product'],
+            'hmm_threshold': t['threshold']
         }
         hmms = [x.strip() for x in t['hmm_file'].split(",")]
         for g in genome_list:
             count = sum(presence_map[g].get(h, 0) for h in hmms)
-            row[f"{g} Presence"] = "Present" if count > 0 else "Absent"
-            row[f"{g} Hit numbers"] = count
+            row[f"{g}_presence"] = "Present" if count > 0 else "Absent"
+            row[f"{g}_hit_count"] = count
         rows1.append(row)
     
     pl.DataFrame(rows1).write_csv(output_dir / "METABOLIC_result_worksheet1.tsv", separator='\t')
@@ -222,9 +222,9 @@ def main(
     rows2 = []
     for t in templates2:
         row = {
-            'Category': t['category'],
-            'Function': t['function'],
-            'Gene abbreviation': t['gene_abbr']
+            'category': t['category'],
+            'function': t['function'],
+            'gene_abbr': t['gene_abbr']
         }
         refs = t['entry_refs'].split("||")
         target_hmms = []
@@ -235,7 +235,7 @@ def main(
         
         for g in genome_list:
             count = sum(presence_map[g].get(h, 0) for h in target_hmms)
-            row[f"{g} Function presence"] = "Present" if count > 0 else "Absent"
+            row[f"{g}_function_presence"] = "Present" if count > 0 else "Absent"
         rows2.append(row)
     
     pl.DataFrame(rows2).write_csv(output_dir / "METABOLIC_result_worksheet2.tsv", separator='\t')
@@ -255,17 +255,17 @@ def main(
         cat = module_cat.get(mod_id, "")
         
         row = {
-            'Module step': step_id,
-            'Module': step['desc'],
-            'KO id': step['k_string'],
-            'Module Category': cat
+            'module_step': step_id,
+            'module_name': step['desc'],
+            'ko_expression': step['k_string'],
+            'module_category': cat
         }
         
         module_steps_count[mod_id] += 1
         
         for g in genome_list:
             is_present = check_step_presence(step['k_string'], ko_map[g])
-            row[f"{g} Module step presence"] = "Present" if is_present else "Absent"
+            row[f"{g}_step_presence"] = "Present" if is_present else "Absent"
             
             if is_present:
                 if mod_id not in module_steps_present:
@@ -292,17 +292,17 @@ def main(
         total_steps = module_steps_count[mod_id]
         
         row = {
-            'Module ID': mod_id,
-            'Module': name,
-            'Module Category': cat
+            'module_id': mod_id,
+            'module_name': name,
+            'module_category': cat
         }
         
         for g in genome_list:
             present_count = module_steps_present.get(mod_id, {}).get(g, 0)
             if total_steps > 0 and present_count / total_steps >= 0.75:
-                row[f"{g} Module presence"] = "Present"
+                row[f"{g}_module_presence"] = "Present"
             else:
-                row[f"{g} Module presence"] = "Absent"
+                row[f"{g}_module_presence"] = "Absent"
         rows3.append(row)
     
     pl.DataFrame(rows3).write_csv(output_dir / "METABOLIC_result_worksheet3.tsv", separator='\t')
@@ -315,9 +315,9 @@ def main(
     
     rows5 = []
     for fam in sorted(all_cazymes):
-        row = {'CAZyme ID': fam}
+        row = {'cazyme_id': fam}
         for g in genome_list:
-            row[f"{g} Hit numbers"] = dbcan_counts[g].get(fam, 0)
+            row[f"{g}_hit_count"] = dbcan_counts[g].get(fam, 0)
         rows5.append(row)
     
     pl.DataFrame(rows5).write_csv(output_dir / "METABOLIC_result_worksheet5.tsv", separator='\t')
@@ -330,9 +330,9 @@ def main(
     
     rows6 = []
     for pep in sorted(all_pep):
-        row = {'MEROPS peptidase ID': pep}
+        row = {'merops_id': pep}
         for g in genome_list:
-            row[f"{g} Hit numbers"] = merops_counts[g].get(pep, 0)
+            row[f"{g}_hit_count"] = merops_counts[g].get(pep, 0)
         rows6.append(row)
     
     pl.DataFrame(rows6).write_csv(output_dir / "METABOLIC_result_worksheet6.tsv", separator='\t')

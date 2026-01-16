@@ -233,14 +233,112 @@ graph TD
 
 ## 📊 Output Files
 
+All output files are TSV format with snake_case column names.
+
+### Intermediate Files
+
 | File | Description |
 |------|-------------|
-| `METABOLIC_result_worksheet1.tsv` | HMM hit details |
-| `METABOLIC_result_worksheet2.tsv` | Function presence/absence matrix |
-| `METABOLIC_result_worksheet3.tsv` | KEGG Module completeness |
-| `METABOLIC_result_worksheet4.tsv` | Biogeochemical cycle steps |
-| `METABOLIC_result_worksheet5.tsv` | dbCAN (CAZyme) hits |
-| `METABOLIC_result_worksheet6.tsv` | MEROPS (Peptidase) hits |
+| `all_hits_parsed.tsv` | All filtered HMM hits with genome assignments |
+| `all_dbcan_parsed.tsv` | CAZyme domain hits |
+| `all_merops_parsed.tsv` | Peptidase hits |
+
+#### `all_hits_parsed.tsv` Columns
+
+| Column | Description |
+|--------|-------------|
+| `seq_id` | Protein ID (e.g., `BBKHAN_02371`) |
+| `hmm_name` | HMM that matched (e.g., `K00003` or `amoA`) |
+| `full_score` | Full sequence bit score |
+| `domain_score` | Best domain bit score |
+| `source` | Hit source: `kofam` or `custom` |
+| `genome_id` | Genome/MAG ID from contig_map |
+
+#### `all_dbcan_parsed.tsv` Columns
+
+| Column | Description |
+|--------|-------------|
+| `seq_id` | Protein ID |
+| `hmm_name` | CAZyme family (e.g., `GH1`, `AA3`) |
+| `hmm_len` | HMM length |
+| `seq_len` | Protein length |
+| `evalue` | Domain i-Evalue |
+| `coverage` | HMM coverage |
+| `genome_id` | Genome/MAG ID |
+
+---
+
+### Final Worksheets
+
+#### Worksheet 1: Gene-level Hits
+
+Detailed gene presence/absence with hit counts per genome.
+
+| Column | Description |
+|--------|-------------|
+| `category` | Functional category |
+| `function` | Metabolic function |
+| `gene_abbr` | Gene abbreviation |
+| `gene_name` | Full gene name |
+| `hmm_file` | HMM file(s) used |
+| `corresponding_ko` | KEGG Orthology ID |
+| `reaction` | KEGG reaction |
+| `product` | Reaction product |
+| `hmm_threshold` | Detection threshold |
+| `{genome}_presence` | Present/Absent |
+| `{genome}_hit_count` | Number of hits |
+
+#### Worksheet 2: Function Summary
+
+Aggregated function presence per genome.
+
+| Column | Description |
+|--------|-------------|
+| `category` | Functional category |
+| `function` | Metabolic function |
+| `gene_abbr` | Gene abbreviation |
+| `{genome}_function_presence` | Present/Absent |
+
+#### Worksheet 3: KEGG Module Completeness
+
+Module-level presence (≥75% steps = Present).
+
+| Column | Description |
+|--------|-------------|
+| `module_id` | KEGG Module ID (e.g., `M00001`) |
+| `module_name` | Module name |
+| `module_category` | Module category |
+| `{genome}_module_presence` | Present/Absent |
+
+#### Worksheet 4: KEGG Module Steps
+
+Step-by-step module presence.
+
+| Column | Description |
+|--------|-------------|
+| `module_step` | Step ID (e.g., `M00001+01`) |
+| `module_name` | Module name |
+| `ko_expression` | Boolean KO expression |
+| `module_category` | Module category |
+| `{genome}_step_presence` | Present/Absent |
+
+#### Worksheet 5: CAZyme Summary
+
+CAZyme family hit counts per genome.
+
+| Column | Description |
+|--------|-------------|
+| `cazyme_id` | CAZyme family (e.g., `GH1`) |
+| `{genome}_hit_count` | Number of hits |
+
+#### Worksheet 6: MEROPS Summary
+
+Peptidase family hit counts per genome.
+
+| Column | Description |
+|--------|-------------|
+| `merops_id` | MEROPS family (e.g., `S01`) |
+| `{genome}_hit_count` | Number of hits |
 
 ---
 
