@@ -6,6 +6,7 @@ This script filters HMM hits based on:
 1. Per-HMM thresholds (from ko_list and hmm_table_template)
 2. Motif validation (active site residues)
 3. Motif pair comparisons (competing HMMs)
+4. Custom DB priority (prefer custom HMM hits over KOfam for same function)
 
 It uses a contig_map to resolve protein IDs to genome/MAG IDs.
 """
@@ -19,7 +20,6 @@ import polars as pl
 import typer
 from Bio import SeqIO
 from rich.console import Console
-from rich.progress import Progress
 
 console = Console(stderr=True)
 app = typer.Typer(add_completion=False)
@@ -76,9 +76,18 @@ def load_ko_list_thresholds(ko_list_file: Path) -> dict[str, dict]:
     return thresholds
 
 
-def load_hmm_template_thresholds(hmm_template_file: Path) -> dict[str, dict]:
-    """Load custom HMM thresholds from hmm_table_template.txt."""
+def load_hmm_template_thresholds(hmm_template_file: Path) -> tuple[dict[str, dict], dict[str, str]]:
+    """
+    Load custom HMM thresholds and HMM-to-KO mapping from hmm_table_template.txt.
+    Returns: (thresholds_dict, hmm_to_ko_dict)
+    
+    Column 6 (index 5) = HMM filename
+    Column 7 (index 6) = Corresponding KO
+    Column 11 (index 10) = threshold|score_type
+    """
     thresholds = {}
+    hmm_to_ko = {}  # custom HMM -> corresponding KO
+    
     with open(hmm_template_file) as f:
         for line in f:
             if line.startswith("#"):
@@ -86,11 +95,18 @@ def load_hmm_template_thresholds(hmm_template_file: Path) -> dict[str, dict]:
             parts = line.strip().split("\t")
             if len(parts) >= 11:
                 hmm_col = parts[5] if len(parts) > 5 else ""
+                ko_col = parts[6] if len(parts) > 6 else ""
                 threshold_col = parts[10] if len(parts) > 10 else ""
                 
+                # Skip empty or KOfam entries (we only want custom HMMs here)
                 if not hmm_col or re.match(r'^K\d{5}\.hmm$', hmm_col):
                     continue
                 
+                # Build HMM -> KO mapping for deduplication
+                if ko_col and re.match(r'^K\d{5}$', ko_col):
+                    hmm_to_ko[hmm_col] = ko_col
+                
+                # Parse threshold
                 if '|' in threshold_col:
                     t_val, t_type = threshold_col.split('|', 1)
                     try:
@@ -102,7 +118,8 @@ def load_hmm_template_thresholds(hmm_template_file: Path) -> dict[str, dict]:
                         thresholds[hmm_col] = {'threshold': float(threshold_col), 'type': 'full'}
                     except ValueError:
                         pass
-    return thresholds
+    
+    return thresholds, hmm_to_ko
 
 
 def load_motifs(motif_file: Optional[Path]) -> dict[str, re.Pattern]:
@@ -135,8 +152,8 @@ def load_motif_pairs(pair_file: Optional[Path]) -> dict[str, str]:
     return pairs
 
 
-def parse_tblout(tblout_file: Path) -> pl.DataFrame:
-    """Parse hmmsearch tblout format using Polars."""
+def parse_tblout(tblout_file: Path, source: str) -> pl.DataFrame:
+    """Parse hmmsearch tblout format using Polars, with source tracking."""
     data = []
     with open(tblout_file) as f:
         for line in f:
@@ -149,12 +166,78 @@ def parse_tblout(tblout_file: Path) -> pl.DataFrame:
                 'seq_id': parts[0],
                 'hmm_name': parts[2],
                 'full_score': float(parts[5]),
-                'domain_score': float(parts[8])
+                'domain_score': float(parts[8]),
+                'source': source  # 'kofam' or 'custom'
             })
     return pl.DataFrame(data) if data else pl.DataFrame(schema={
         'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
-        'full_score': pl.Float64, 'domain_score': pl.Float64
+        'full_score': pl.Float64, 'domain_score': pl.Float64, 'source': pl.Utf8
     })
+
+
+def deduplicate_hits(
+    valid_hits: list[dict], 
+    hmm_to_ko: dict[str, str],
+    prefer_custom: bool
+) -> list[dict]:
+    """
+    Deduplicate hits when same protein matches both custom and KOfam for same function.
+    
+    If prefer_custom=True:
+    - When a protein has hits from both custom_db and KOfam for the same underlying KO,
+      keep only the custom_db hit.
+    """
+    if not prefer_custom or not hmm_to_ko:
+        return valid_hits
+    
+    # Build reverse map: KO -> [custom HMMs that map to it]
+    ko_to_custom_hmms = {}
+    for hmm, ko in hmm_to_ko.items():
+        if ko not in ko_to_custom_hmms:
+            ko_to_custom_hmms[ko] = set()
+        ko_to_custom_hmms[ko].add(hmm.replace('.hmm', ''))
+    
+    # Group hits by seq_id
+    hits_by_seq: dict[str, list[dict]] = {}
+    for hit in valid_hits:
+        seq_id = hit['seq_id']
+        if seq_id not in hits_by_seq:
+            hits_by_seq[seq_id] = []
+        hits_by_seq[seq_id].append(hit)
+    
+    # For each seq_id, check for overlapping KOfam/custom hits
+    deduplicated = []
+    removed_count = 0
+    
+    for seq_id, hits in hits_by_seq.items():
+        # Identify KOfam hits and custom hits
+        kofam_hits = [h for h in hits if h.get('source') == 'kofam']
+        custom_hits = [h for h in hits if h.get('source') == 'custom']
+        
+        # For each custom hit, find if there's a corresponding KOfam hit
+        custom_kos = set()
+        for ch in custom_hits:
+            hmm_name = ch['hmm_name']
+            hmm_file = f"{hmm_name}.hmm"
+            if hmm_file in hmm_to_ko:
+                custom_kos.add(hmm_to_ko[hmm_file])
+        
+        # Filter KOfam hits: remove if custom already covers that KO
+        filtered_kofam = []
+        for kh in kofam_hits:
+            ko = kh['hmm_name']  # KOfam hmm_name is the KO id (e.g., K00001)
+            if ko in custom_kos:
+                removed_count += 1
+                continue  # Skip this KOfam hit, custom takes priority
+            filtered_kofam.append(kh)
+        
+        deduplicated.extend(custom_hits)
+        deduplicated.extend(filtered_kofam)
+    
+    if removed_count > 0:
+        console.log(f"[cyan]Custom DB priority: removed {removed_count} redundant KOfam hits")
+    
+    return deduplicated
 
 
 @app.command()
@@ -169,6 +252,8 @@ def main(
     motif_file: Optional[Path] = typer.Option(None, "--motif_file", help="Motif definitions"),
     motif_pair_file: Optional[Path] = typer.Option(None, "--motif_pair_file", help="Motif pairs"),
     cluster_tsv: Optional[Path] = typer.Option(None, "--cluster_tsv", help="MMseqs2 cluster TSV"),
+    prefer_custom: bool = typer.Option(True, "--prefer_custom/--no-prefer-custom", 
+                                       help="Prefer custom_db hits over KOfam when both match same function"),
 ):
     """Parse HMMsearch results for METABOLIC pipeline."""
     
@@ -177,36 +262,37 @@ def main(
     # 1. Load mappings
     contig_to_genome = load_contig_map(contig_map)
     thresholds = load_ko_list_thresholds(ko_list)
-    custom_thresholds = load_hmm_template_thresholds(hmm_template)
+    custom_thresholds, hmm_to_ko = load_hmm_template_thresholds(hmm_template)
     thresholds.update(custom_thresholds)
     
     motif_regex = load_motifs(motif_file)
     motif_pairs = load_motif_pairs(motif_pair_file)
     
-    console.log(f"[green]Loaded {len(thresholds)} HMM thresholds")
+    console.log(f"[green]Loaded {len(thresholds)} HMM thresholds, {len(hmm_to_ko)} custom-to-KO mappings")
     
-    # 2. Parse Results
+    # 2. Parse Results with source tracking
     console.log("[bold blue]Parsing HMM results...")
-    df = parse_tblout(kofam_results)
+    df = parse_tblout(kofam_results, source='kofam')
     
     if custom_results:
-        df_cust = parse_tblout(custom_results)
+        df_cust = parse_tblout(custom_results, source='custom')
         df = pl.concat([df, df_cust])
     
     if df.height == 0:
         console.log("[yellow]No hits found, writing empty output")
         pl.DataFrame(schema={
             'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
-            'full_score': pl.Float64, 'domain_score': pl.Float64, 'genome_id': pl.Utf8
+            'full_score': pl.Float64, 'domain_score': pl.Float64, 
+            'source': pl.Utf8, 'genome_id': pl.Utf8
         }).write_csv(output, separator='\t')
         return
 
-    console.log(f"[green]Parsed {df.height} raw hits")
+    console.log(f"[green]Parsed {df.height} raw hits (KOfam + Custom)")
     
     # 3. Pre-load sequences for motif validation
     seq_dict = SeqIO.to_dict(SeqIO.parse(proteins, "fasta"))
     
-    # 4. Filter by Thresholds and Motifs (row-wise logic required)
+    # 4. Filter by Thresholds and Motifs
     df_dict = df.to_dicts()
     score_map = {(r['seq_id'], r['hmm_name']): r['full_score'] for r in df_dict}
     
@@ -248,7 +334,12 @@ def main(
 
     console.log(f"[green]Filtered to {len(valid_hits)} valid hits")
     
-    # 5. Expand hits if clustering was used
+    # 5. Apply custom DB priority deduplication
+    if prefer_custom and custom_results:
+        valid_hits = deduplicate_hits(valid_hits, hmm_to_ko, prefer_custom)
+        console.log(f"[green]After deduplication: {len(valid_hits)} hits")
+    
+    # 6. Expand hits if clustering was used
     if cluster_tsv:
         cluster_map = load_cluster_map(cluster_tsv)
         expanded_rows = []
@@ -262,7 +353,7 @@ def main(
         valid_hits = expanded_rows
         console.log(f"[green]Expanded to {len(valid_hits)} hits after cluster expansion")
     
-    # 6. Add genome_id and write output
+    # 7. Add genome_id and write output
     if valid_hits:
         final_df = pl.DataFrame(valid_hits)
         final_df = final_df.with_columns(
@@ -278,7 +369,8 @@ def main(
     else:
         pl.DataFrame(schema={
             'seq_id': pl.Utf8, 'hmm_name': pl.Utf8, 
-            'full_score': pl.Float64, 'domain_score': pl.Float64, 'genome_id': pl.Utf8
+            'full_score': pl.Float64, 'domain_score': pl.Float64,
+            'source': pl.Utf8, 'genome_id': pl.Utf8
         }).write_csv(output, separator='\t')
         console.log("[yellow]No valid hits, wrote empty output")
 

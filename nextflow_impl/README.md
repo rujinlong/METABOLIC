@@ -106,6 +106,44 @@ nextflow run main.nf \
 
 ---
 
+## 🎯 Custom DB Priority
+
+By default, when the same protein hits both **custom_db** and **KOfam** for the same underlying function, the pipeline **prefers custom_db hits**.
+
+### Why?
+
+- **Custom HMMs are more specific**: Curated for biogeochemical cycles in METABOLIC
+- **Avoid double-counting**: Same gene shouldn't be counted twice
+- **Better motif validation**: Custom HMMs often have stricter active-site requirements
+
+### How It Works
+
+1. The `hmm_table_template.txt` contains mappings: `custom_hmm` → `corresponding_KO`
+2. When a protein matches both `amoA.hmm` (custom) and `K10944` (KOfam):
+   - Both hits pass threshold filtering
+   - Deduplication removes the KOfam hit (since custom covers K10944)
+   - Only the custom hit is kept
+
+### Behavior Control
+
+The `--prefer_custom` flag is **enabled by default**. To disable:
+
+```bash
+# Keep all hits (no deduplication)
+nextflow run main.nf ... --no-prefer-custom
+```
+
+### Example Output
+
+```
+[12:00:03] Parsed 150000 raw hits (KOfam + Custom)
+[12:00:05] Filtered to 45000 valid hits
+[12:00:05] Custom DB priority: removed 823 redundant KOfam hits
+[12:00:05] After deduplication: 44177 hits
+```
+
+---
+
 ## 💾 Database Setup
 
 ### Directory Structure
