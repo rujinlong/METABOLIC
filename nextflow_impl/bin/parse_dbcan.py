@@ -3,6 +3,7 @@
 Parse dbCAN hmmscan domtblout results for METABOLIC.
 Implements the legacy hmmscan-parser-dbCANmeta.py logic with overlap resolution.
 """
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional

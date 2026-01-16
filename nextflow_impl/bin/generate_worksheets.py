@@ -3,6 +3,7 @@
 Generate METABOLIC result worksheets.
 Produces 6 worksheets summarizing HMM hits, KEGG modules, dbCAN, and MEROPS results.
 """
+from __future__ import annotations
 
 import re
 from collections import defaultdict

@@ -4,6 +4,7 @@ Parse Diamond BLASTP results against MEROPS database.
 Maps protein hits to peptidase families using contig_map for genome resolution.
 Supports cluster expansion from MMseqs2 clustering.
 """
+from __future__ import annotations
 
 import re
 from pathlib import Path

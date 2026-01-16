@@ -10,6 +10,7 @@ This script filters HMM hits based on:
 
 It uses a contig_map to resolve protein IDs to genome/MAG IDs.
 """
+from __future__ import annotations
 
 import sys
 import re
