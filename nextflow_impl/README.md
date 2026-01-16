@@ -219,7 +219,13 @@ graph TD
     K --> M
     L --> M
     
-    M --> N[Worksheet 1-6]
+    M --> N[Worksheet 1-6 TSV]
+    M --> O[CREATE_EXCEL]
+    O --> P[METABOLIC_result.xlsx]
+    
+    J --> Q[GENERATE_R_INPUTS]
+    Q --> R[PLOT_CYCLES]
+    R --> S[PDF Diagrams]
 ```
 
 ### Steps
@@ -228,12 +234,22 @@ graph TD
 2. **Search**: Representative proteins searched against merged HMM databases
 3. **Parse**: Filter hits by thresholds, expand clusters, resolve genome IDs
 4. **Generate**: Produce 6 worksheets summarizing metabolic potential
+5. **Visualize**: Generate biogeochemical cycle PDF diagrams (N/C/S/Other)
+6. **Excel**: Merge all TSVs into formatted `.xlsx` file
 
 ---
 
 ## 📊 Output Files
 
 All output files are TSV format with snake_case column names.
+
+### Visualization & Excel Outputs
+
+| File | Description |
+|------|-------------|
+| `tables/METABOLIC_result.xlsx` | Excel workbook with all 6 worksheets + conditional formatting |
+| `figures/draw_biogeochem_cycles/*.pdf` | Biogeochemical cycle diagrams (N/C/S/Other) per genome |
+| `figures_input/Nutrient_Cycling_Diagram_Input/*.txt` | R_input files for each genome |
 
 ### Intermediate Files
 

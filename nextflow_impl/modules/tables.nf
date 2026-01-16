@@ -19,6 +19,7 @@ process GENERATE_TABLES {
     path "METABOLIC_result_worksheet4.tsv"
     path "METABOLIC_result_worksheet5.tsv"
     path "METABOLIC_result_worksheet6.tsv"
+    path ".", emit: tables_dir
 
     script:
     def dbcan_arg = dbcan_hits.name != 'NO_FILE' ? "--dbcan_hits $dbcan_hits" : ""

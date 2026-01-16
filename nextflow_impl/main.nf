@@ -11,6 +11,7 @@ include { DBCAN_SEARCH } from './modules/dbcan'
 include { MEROPS_SEARCH } from './modules/merops'
 include { PARSE_HMM; PARSE_DBCAN; PARSE_MEROPS } from './modules/parsing'
 include { GENERATE_TABLES } from './modules/tables'
+include { GENERATE_R_INPUTS; PLOT_CYCLES; CREATE_EXCEL } from './modules/visualization'
 
 /*
  * Help Message
@@ -144,4 +145,15 @@ workflow {
         PARSE_MEROPS.out.hits,
         ch_genome_ids
     )
+    
+    // 8. Generate Visualization (R_input files + PDF cycle diagrams)
+    GENERATE_R_INPUTS(
+        PARSE_HMM.out.hits,
+        file(params.r_pathways)
+    )
+    
+    PLOT_CYCLES(GENERATE_R_INPUTS.out.r_input_dir)
+    
+    // 9. Create Excel spreadsheet from TSV worksheets
+    CREATE_EXCEL(GENERATE_TABLES.out.tables_dir)
 }
