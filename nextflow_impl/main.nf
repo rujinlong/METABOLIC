@@ -6,6 +6,7 @@ nextflow.enable.dsl=2
  * Import Modules
  */
 include { MMSEQS_CLUSTER } from './modules/cluster'
+include { SPLIT_FASTA } from './modules/split'
 include { HMMSEARCH_KO; HMMSEARCH_CUSTOM } from './modules/search'
 include { DBCAN_SEARCH } from './modules/dbcan'
 include { MEROPS_SEARCH } from './modules/merops'
@@ -102,18 +103,37 @@ workflow {
     ch_merops_db = file(params.merops_db)
     ch_merops_lib = file(params.merops_lib)
     
-    // 4. Run Searches (all in parallel)
-    HMMSEARCH_KO(ch_proteins, ch_kofam_db)
-    HMMSEARCH_CUSTOM(ch_proteins, ch_custom_db)
-    DBCAN_SEARCH(ch_proteins, ch_dbcan_db)
-    MEROPS_SEARCH(ch_proteins, ch_merops_db)
+    // 4. Split proteins into chunks for parallel processing
+    log.info "Splitting proteins into chunks of ${params.chunk_size} for parallel processing"
+    SPLIT_FASTA(ch_proteins, params.chunk_size)
+    ch_chunks = SPLIT_FASTA.out.chunks.flatten().map { file -> tuple(file.baseName, file) }
     
-    // 5. Join HMM Results for Parsing
-    ch_hmm_results = HMMSEARCH_KO.out.tblout
-        .join(HMMSEARCH_CUSTOM.out.tblout, by: 0)
-        .combine(ch_proteins.map { it[1] })  // Add protein file for motif validation
-        
-    // 6. Parse Results with contig_map and cluster_tsv for expansion
+    // 5. Run Searches in parallel (each chunk independently)
+    HMMSEARCH_KO(ch_chunks, ch_kofam_db)
+    HMMSEARCH_CUSTOM(ch_chunks, ch_custom_db)
+    DBCAN_SEARCH(ch_chunks, ch_dbcan_db)
+    MEROPS_SEARCH(ch_proteins, ch_merops_db)  // MEROPS stays on full file (fast)
+    
+    // 6. Merge HMM results from all chunks
+    ch_kofam_merged = HMMSEARCH_KO.out.tblout
+        .map { name, tblout -> tblout }
+        .collectFile(name: 'kofam_all.tblout', storeDir: "${params.outdir}/intermediate")
+    
+    ch_custom_merged = HMMSEARCH_CUSTOM.out.tblout
+        .map { name, tblout -> tblout }
+        .collectFile(name: 'custom_all.tblout', storeDir: "${params.outdir}/intermediate")
+    
+    ch_dbcan_merged = DBCAN_SEARCH.out.domtblout
+        .map { name, domtblout -> domtblout }
+        .collectFile(name: 'dbcan_all.domtblout', storeDir: "${params.outdir}/intermediate")
+    
+    // 7. Prepare merged results for parsing
+    ch_hmm_results = ch_kofam_merged
+        .combine(ch_custom_merged)
+        .combine(ch_proteins.map { it[1] })
+        .map { kofam, custom, proteins -> tuple('merged', kofam, custom, proteins) }
+    
+    // 8. Parse Results with contig_map and cluster_tsv for expansion
     PARSE_HMM(
         ch_hmm_results,
         file(params.ko_list),
@@ -124,7 +144,7 @@ workflow {
         ch_cluster_tsv
     )
     
-    PARSE_DBCAN(DBCAN_SEARCH.out.domtblout, ch_contig_map, ch_cluster_tsv)
+    PARSE_DBCAN(ch_dbcan_merged.map { tuple('merged', it) }, ch_contig_map, ch_cluster_tsv)
     
     PARSE_MEROPS(MEROPS_SEARCH.out.m8, ch_merops_lib, ch_contig_map, ch_cluster_tsv)
     
