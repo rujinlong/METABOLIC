@@ -47,28 +47,26 @@ def extract_contig_from_protein(protein_id: str) -> str:
 
 
 def load_contig_map(contig_map_file: Path) -> dict[str, str]:
-    """Load contig-to-genome mapping."""
-    contig_to_genome = {}
-    with open(contig_map_file) as f:
-        for line in f:
-            parts = line.strip().split('\t')
-            if len(parts) >= 2:
-                contig_to_genome[parts[0]] = parts[1]
-    return contig_to_genome
+    """Load contig-to-genome mapping using Polars."""
+    df = pl.read_csv(
+        contig_map_file, 
+        separator='\t', 
+        has_header=False, 
+        new_columns=['contig_id', 'genome_id']
+    )
+    return dict(zip(df['contig_id'].to_list(), df['genome_id'].to_list()))
 
 
 def load_cluster_map(cluster_tsv_file: Path) -> dict[str, list[str]]:
-    """Load MMseqs2 cluster membership: rep_id -> [member_ids]."""
-    cluster_map: dict[str, list[str]] = {}
-    with open(cluster_tsv_file) as f:
-        for line in f:
-            parts = line.strip().split('\t')
-            if len(parts) >= 2:
-                rep_id, member_id = parts[0], parts[1]
-                if rep_id not in cluster_map:
-                    cluster_map[rep_id] = []
-                cluster_map[rep_id].append(member_id)
-    return cluster_map
+    """Load MMseqs2 cluster membership using Polars: rep_id -> [member_ids]."""
+    df = pl.read_csv(
+        cluster_tsv_file, 
+        separator='\t', 
+        has_header=False, 
+        new_columns=['rep_id', 'member_id']
+    )
+    grouped = df.group_by('rep_id').agg(pl.col('member_id').alias('members'))
+    return {row['rep_id']: row['members'] for row in grouped.iter_rows(named=True)}
 
 
 @app.command()

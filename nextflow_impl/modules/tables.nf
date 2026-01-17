@@ -30,7 +30,8 @@ process GENERATE_TABLES {
         $dbcan_arg \\
         $merops_arg \\
         --output_dir ./ \\
-        --genome_ids ${genome_ids.join(',')}
+        --genome_ids ${genome_ids.join(',')} \\
+        --module_cutoff ${params.module_cutoff}
     
     # Create directory with worksheets for CREATE_EXCEL
     mkdir -p worksheets_dir

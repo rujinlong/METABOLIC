@@ -131,6 +131,7 @@ def main(
     genome_ids: str = typer.Option(..., "--genome_ids", help="Comma-separated genome IDs"),
     dbcan_hits: Optional[Path] = typer.Option(None, "--dbcan_hits", help="Parsed dbCAN hits TSV"),
     merops_hits: Optional[Path] = typer.Option(None, "--merops_hits", help="Parsed MEROPS hits TSV"),
+    module_cutoff: float = typer.Option(0.75, "--module_cutoff", help="Cutoff for KEGG module presence (default: 0.75)"),
 ):
     """Generate METABOLIC result worksheets."""
     
@@ -299,7 +300,7 @@ def main(
         
         for g in genome_list:
             present_count = module_steps_present.get(mod_id, {}).get(g, 0)
-            if total_steps > 0 and present_count / total_steps >= 0.75:
+            if total_steps > 0 and present_count / total_steps >= module_cutoff:
                 row[f"{g}_module_presence"] = "Present"
             else:
                 row[f"{g}_module_presence"] = "Absent"
