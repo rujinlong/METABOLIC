@@ -48,6 +48,8 @@ def load_cluster_map(cluster_tsv_file: Path) -> dict[str, list[str]]:
         new_columns=['rep_id', 'member_id']
     )
     grouped = df.group_by('rep_id').agg(pl.col('member_id').alias('members'))
+    # get the first row of grouped
+    console.log(grouped.head())
     return {row['rep_id']: row['members'] for row in grouped.iter_rows(named=True)}
 
 
