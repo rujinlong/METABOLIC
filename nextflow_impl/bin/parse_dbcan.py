@@ -34,6 +34,8 @@ def load_contig_map(contig_map_file: Path) -> dict[str, str]:
         has_header=False, 
         new_columns=['contig_id', 'genome_id']
     )
+    # plot head of df
+    console.log(df.head())
     return dict(zip(df['contig_id'].to_list(), df['genome_id'].to_list()))
 
 
