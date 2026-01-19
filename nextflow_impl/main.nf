@@ -167,12 +167,17 @@ workflow {
     )
     
     // 8. Generate Visualization (R_input files + PDF cycle diagrams)
-    GENERATE_R_INPUTS(
-        PARSE_HMM.out.hits,
-        file(params.r_pathways)
-    )
-    
-    PLOT_CYCLES(GENERATE_R_INPUTS.out.r_input_dir)
+    // Skip if --disable_plot is set (recommended for large datasets with millions of genomes)
+    if (!params.disable_plot) {
+        GENERATE_R_INPUTS(
+            PARSE_HMM.out.hits,
+            file(params.r_pathways)
+        )
+        
+        PLOT_CYCLES(GENERATE_R_INPUTS.out.r_input_dir)
+    } else {
+        log.info "Skipping visualization (--disable_plot=true)"
+    }
     
     // 9. Create Excel spreadsheet from TSV worksheets
     CREATE_EXCEL(GENERATE_TABLES.out.tables_dir)
