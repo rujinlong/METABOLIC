@@ -367,3 +367,69 @@ Peptidase family hit counts per genome.
 | `singularity` | Singularity container |
 | `hpc` | SLURM cluster (high memory/CPUs) |
 | `test` | Test with sample data |
+
+## 🌍 Community Profiling (Pseudo-MAG Strategy)
+
+This pipeline can be adapted for **Qualitative Community Profiling** (Metabolic potential of an entire sample) without requiring true METABOLIC-C (reads mapping).
+
+### Concept
+Instead of mapping contigs to specific genomes (MAGs), you treat **each sample as a "Pseudo-MAG"**. All contigs assembled from Sample A are assigned to "Genome_SampleA".
+
+- **Pros**: 
+  - Extremely fast (no reads mapping required).
+  - Can profile all assembled contigs, not just high-quality bins.
+  - Good for generating hypotheses (e.g., "Does this environment have nitrogen fixation potential?").
+- **Cons**: 
+  - **Qualitative only** (Binary Presence/Absence).
+  - No abundance information (RPKM/TPM).
+  - "Completeness" scores reflect the community's potential synergy, not a single organism's capability.
+
+### How to Implement
+
+1. **Prepare `contig_map.tsv`**:
+   Map every contig from a sample to that sample's ID.
+
+   ```tsv
+   # Contig ID          # Genome ID (Use Sample ID)
+   SampleA_scaffold_1   Sample_A
+   SampleA_scaffold_2   Sample_A
+   ...
+   SampleB_scaffold_1   Sample_B
+   ```
+
+2. **Run Pipeline**:
+   ```bash
+   nextflow run main.nf --contig_map sample_level_map.tsv ...
+   ```
+   
+3. **Interpret Results**:
+   - `Sample_A` having "Nitrogen fixation" means the **community** in Sample A possesses the genes for this pathway.
+
+---
+
+### ✅ Verification of Key Findings
+
+If you identify a critical function (e.g., Nitrogen Fixation) using this strategy, **validation is essential** to distinguish biological reality from assembly artifacts or rare contaminants.
+
+#### 1. Dry-Lab Verification (Bioinformatics)
+
+- **Sanity Check (Operon Structure)**:
+  - Extract the protein sequences (`nifH`, `nifD`, `nifK`) identified by the pipeline.
+  - Check if they are co-located on the same contig (forming an operon). Physical linkage is strong evidence of a functional pathway.
+  - Blastp against NCBI nr to confirm they are true functional orthologs, not paralogs (e.g., chlorophyll synthesis genes resembling *nifH*).
+
+- **Taxonomic Assignment**:
+  - Run CAT/BAT or Kraken2 on the specific contigs containing the key genes to identify the likely host organism (e.g., *Rhizobium* vs *Cyanobacteria*).
+
+- **Abundance Mapping (Quantitative Check)**:
+  - Map reads back to these specific contigs.
+  - **Critical**: If coverage is < 1x, the finding may be due to rare contamination or sequencing artifacts and likely lacks ecological significance.
+
+#### 2. Wet-Lab Verification (Experimental)
+
+- **PCR / qPCR**: 
+  - Verify gene presence and quantify copy number in environmental DNA.
+- **RT-qPCR**: 
+  - **Strong Evidence**: Detect mRNA transcripts to prove the gene is **actively expressed** in the environment.
+- **Isotope Tracing (${}^{15}N$ / ${}^{13}C$)**: 
+  - **Gold Standard**: Incubate sample with labeled substrate (e.g., ${}^{15}N_2$) and track incorporation into biomass. This proves the **metabolic activity actually occurred**.
